@@ -1,0 +1,306 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Icon } from './icons.jsx';
+import { Btn, IconBtn, Spinner, Chip } from './ui.jsx';
+import { FIELD_SECTIONS } from './constants.js';
+import { recName, fmtDateTime, fmtDur, countEmpty, flattenFields, unflattenVals, applyDict, apiFetch } from './helpers.js';
+
+// ── ClinicalField ────────────────────────────────────────────────────────────
+export function ClinicalField({ id, label, value, long, filterMode, onChange, onHover, hasSource }) {
+  const [focus, setFocus] = useState(false);
+  const empty = !String(value||'').trim();
+  const warn  = filterMode && empty;
+  const Input = long ? 'textarea' : 'input';
+  return (
+    <div
+      onMouseEnter={hasSource ? () => onHover?.(id) : undefined}
+      onMouseLeave={hasSource ? () => onHover?.(null) : undefined}
+      style={{ padding: warn ? '10px 8px' : '10px 0',
+        margin: warn ? '0 -8px' : 0, borderRadius: warn ? 6 : 0,
+        borderBottom:`1px solid ${focus?'var(--accent)':warn?'var(--warn-border)':'var(--border-subtle)'}`,
+        transition:'border-color 0.12s, background 0.12s',
+        background: warn ? 'var(--warn-bg)' : 'transparent' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:4 }}>
+        {empty && <span style={{ width:5, height:5, borderRadius:'50%', background:'var(--warn-dot)', flexShrink:0 }}/>}
+        <label style={{ fontSize:10.5, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase',
+          color:empty?'var(--warn)':'var(--faint)', cursor:hasSource?'help':'default' }}>{label}</label>
+        {hasSource && <span title="Pasa el cursor para ver la fuente en la transcripción"
+          style={{ width:5, height:5, borderRadius:'50%', background:'var(--accent)', flexShrink:0, opacity:0.7 }}/>}
+      </div>
+      <Input value={value||''} onChange={e=>onChange(id,e.target.value)}
+        onFocus={()=>setFocus(true)} onBlur={()=>setFocus(false)}
+        placeholder={empty?'Sin datos…':''}
+        rows={long?Math.max(2,Math.ceil((String(value||'').length||20)/72)):undefined}
+        style={{ width:'100%', border:'none', outline:'none', background:'transparent', resize:'none',
+          fontFamily:'inherit', fontSize:long?13.5:14.5, color:empty?'var(--faint)':'var(--text)',
+          lineHeight:1.65, padding:0 }}/>
+    </div>
+  );
+}
+
+// ── FieldGroup ───────────────────────────────────────────────────────────────
+export function FieldGroup({ icon, title, children, emptyCount, filterMode }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div style={{ marginBottom:28 }}>
+      <button type="button" onClick={()=>setOpen(v=>!v)}
+        style={{ display:'flex', alignItems:'center', gap:8, background:'none', border:'none',
+          cursor:'pointer', padding:'4px 0', marginBottom:open?4:0, width:'100%', textAlign:'left' }}>
+        <Icon name="chevR" size={12} stroke={2.5}
+          style={{ color:'var(--faint)', transform:open?'rotate(90deg)':'none', transition:'transform 0.18s', flexShrink:0 }}/>
+        <div style={{ width:22, height:22, borderRadius:6, background:'var(--accent-soft)', color:'var(--accent-strong)',
+          display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+          <Icon name={icon} size={11}/>
+        </div>
+        <span style={{ fontSize:11, fontWeight:800, letterSpacing:'0.07em', textTransform:'uppercase',
+          color:'var(--muted)', flex:1 }}>{title}</span>
+        {filterMode && emptyCount > 0 && (
+          <span style={{ fontSize:11, fontWeight:650, color:'var(--warn)',
+            background:'var(--warn-bg)', border:'1px solid var(--warn-border)',
+            borderRadius:4, padding:'1px 7px', flexShrink:0 }}>
+            {emptyCount} vacío{emptyCount>1?'s':''}
+          </span>
+        )}
+      </button>
+      {open && <div style={{ animation:'mr-fade 0.18s ease both' }}>{children}</div>}
+    </div>
+  );
+}
+
+// ── AiBanner ─────────────────────────────────────────────────────────────────
+export function AiBanner({ rec, emptyCount, onReextract, reextracting }) {
+  let bg, bd, fg, msg, spin=false, action=null;
+  if (rec.status==='filling'||reextracting) {
+    bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
+    msg='Completando los campos con IA local…'; spin=true;
+  } else if (rec.fieldsError) {
+    bg='var(--warn-bg)'; bd='var(--warn-border)'; fg='var(--warn)';
+    msg='El autollenado falló. Transcripción disponible, revisa a mano o reintenta.';
+    action=<Btn variant="soft" size="sm" icon="refresh" onClick={onReextract}>Reintentar</Btn>;
+  } else if (rec.fields) {
+    bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
+    msg=emptyCount>0?`Campos pre-llenados por IA. ${emptyCount} por completar.`:'Campos pre-llenados por IA. Revisa y corrige antes de firmar.';
+  } else {
+    bg='var(--warn-bg)'; bd='var(--warn-border)'; fg='var(--warn)';
+    msg='Sin autollenado disponible. Completa los campos desde la transcripción.';
+  }
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px', marginBottom:24,
+      borderRadius:10, background:bg, border:`1px solid ${bd}`, color:fg, fontSize:13 }}>
+      {spin ? <Spinner size={14} color={fg}/> : <Icon name="sparkle" size={15} style={{ flexShrink:0 }}/>}
+      <span style={{ flex:1 }}>{msg}</span>
+      {action}
+    </div>
+  );
+}
+
+// ── PrintDoc ─────────────────────────────────────────────────────────────────
+export function PrintDoc({ rec, vals, cfg, dict }) {
+  const name  = vals['filiacion.nombre']||recName(rec);
+  const doc   = vals['filiacion.documento']||(rec.patient?.dni)||'';
+  const fecha = vals['filiacion.fecha_consulta']||new Date(rec.createdAt).toLocaleDateString('es-PE',{day:'2-digit',month:'long',year:'numeric'});
+  return (
+    <div className="print-doc">
+      <div style={{borderBottom:'2px solid #111',paddingBottom:10,marginBottom:16,display:'flex',justifyContent:'space-between',alignItems:'flex-end'}}>
+        <div><div style={{fontSize:18,fontWeight:800}}>{cfg.clinicName||'Historia clínica'}</div><div style={{fontSize:12,color:'#444'}}>Historia clínica · {fecha}</div></div>
+        {cfg.doctorName?<div style={{fontSize:12,textAlign:'right'}}>{cfg.doctorName}</div>:null}
+      </div>
+      <div style={{display:'flex',gap:24,marginBottom:14,fontSize:12}}>
+        <div><strong>Paciente:</strong> {name}</div>{doc?<div><strong>Documento:</strong> {doc}</div>:null}
+      </div>
+      {FIELD_SECTIONS.map(sec=>{
+        const rows=sec.fields.map(([fk,label])=>[label,vals[sec.key+'.'+fk]]).filter(([,v])=>String(v||'').trim());
+        if(!rows.length)return null;
+        return(<div key={sec.key} style={{marginBottom:14,breakInside:'avoid'}}>
+          <div style={{fontSize:12.5,fontWeight:800,textTransform:'uppercase',letterSpacing:'0.04em',borderBottom:'1px solid #bbb',paddingBottom:3,marginBottom:6}}>{sec.title}</div>
+          {rows.map(([label,v])=><div key={label} style={{marginBottom:5}}><span style={{fontWeight:700}}>{label}: </span><span>{v}</span></div>)}
+        </div>);
+      })}
+      {rec.transcript&&<div style={{marginTop:18,breakInside:'avoid'}}>
+        <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',color:'#666',borderTop:'1px solid #ddd',paddingTop:8}}>Anexo · Transcripción</div>
+        <div style={{fontSize:10.5,color:'#444',whiteSpace:'pre-wrap',marginTop:4}}>{applyDict(rec.transcript, dict)}</div>
+      </div>}
+    </div>
+  );
+}
+
+// ── ClinicalFields (Column B) ─────────────────────────────────────────────────
+export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete, onRetry, onReextract, onSign, onPrev, onNext, queuePos, pendingCount }) {
+  const sources = rec?.sources || {};
+  // Aplica el diccionario médico al aplanar los campos (queda corregido al firmar).
+  const flat = (f) => { const o = flattenFields(f); for (const k in o) o[k] = applyDict(o[k], dict); return o; };
+
+  const [vals,   setVals]   = useState(()=>flat(rec?.fields));
+  const [save,   setSave]   = useState('idle');
+  const [dirty,  setDirty]  = useState(false);
+  const [onlyEmpty, setOnlyEmpty] = useState(false);
+  const [reextracting, setReextracting] = useState(false);
+  const touched = useRef({});
+
+  // Merge incoming LLM field updates without overwriting user edits
+  useEffect(() => {
+    if (!rec?.fields) return;
+    const fresh = flat(rec.fields);
+    setVals(prev => {
+      const next = { ...prev };
+      for (const k of Object.keys(fresh)) if (!touched.current[k] && fresh[k]) next[k] = fresh[k];
+      return next;
+    });
+  }, [rec?.fields]);
+
+  // Reset state on rec change
+  useEffect(() => {
+    setVals(flat(rec?.fields));
+    setSave('idle'); setDirty(false); setOnlyEmpty(false);
+    touched.current = {};
+  }, [rec?.id]);
+
+  useEffect(() => {
+    if (reextracting && (rec?.status==='done'||rec?.status==='reviewed')) setReextracting(false);
+  }, [rec?.status, rec?.fields]);
+
+  const setField = (id, v) => { touched.current[id]=true; setVals(s=>({...s,[id]:v})); setDirty(true); setSave('idle'); };
+  const { empty: emptyCount } = useMemo(() => countEmpty(vals), [vals]);
+
+  const doSave = async (markReviewed=false) => {
+    setSave('saving');
+    try {
+      const body = {
+        fields: unflattenVals(vals),
+        patient: { name:vals['filiacion.nombre']||(rec.patient?.name)||'', dni:vals['filiacion.documento']||(rec.patient?.dni)||'' },
+        ...(markReviewed ? { reviewed:true } : {}),
+      };
+      const r = await apiFetch(`/api/recordings/${rec.id}/fields`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      if (!r.ok) throw new Error('save');
+      const updated = await r.json();
+      setSave('saved'); setDirty(false);
+      onSaved?.(updated);
+      return updated;
+    } catch { setSave('error'); return null; }
+  };
+
+  const doSign = async () => {
+    const updated = await doSave(true);
+    if (updated) onSign?.(updated);
+  };
+
+  const doReextract = async () => {
+    setReextracting(true);
+    try { await apiFetch(`/api/recordings/${rec.id}/reextract`, { method:'POST' }); } catch {}
+  };
+
+  const isReviewed = rec?.status === 'reviewed' || rec?.reviewed;
+  const isError    = rec?.status === 'error';
+  const isProc     = ['received','processing','filling'].includes(rec?.status);
+  const patientKey = 'filiacion.nombre';
+  const patientName = vals[patientKey] || recName(rec);
+
+  const saveLabel   = save==='saving' ? 'Guardando…' : save==='error' ? 'Reintentar' : 'Guardar';
+  const saveVariant = save==='error' ? 'danger' : 'ghost';
+
+  if (!rec) return (
+    <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', color:'var(--faint)', fontSize:14 }}>
+      Selecciona un paciente
+    </div>
+  );
+
+  return (
+    <div style={{ flex:1, minWidth:0, background:'var(--surface)', display:'flex', flexDirection:'column', overflow:'hidden', borderRight:'1px solid var(--border-subtle)' }}>
+      <PrintDoc rec={rec} vals={vals} cfg={cfg||{}} dict={dict}/>
+
+      {/* Scroll area */}
+      <div className="mr-scroll" style={{ flex:1, overflowY:'auto' }}>
+        <div style={{ maxWidth:680, margin:'0 auto', padding:'36px 44px 60px' }}>
+
+          {/* H1 editable */}
+          <input value={vals[patientKey]||''} onChange={e=>setField(patientKey,e.target.value)}
+            placeholder="Nombre del paciente"
+            style={{ width:'100%', border:'none', outline:'none', background:'transparent',
+              fontFamily:'inherit', fontSize:36, fontWeight:800, letterSpacing:'-0.03em',
+              color:'var(--text)', lineHeight:1.15, marginBottom:8, padding:0,
+              borderBottom:'2px dashed transparent', transition:'border-color 0.15s', cursor:'text' }}
+            onFocus={e=>e.target.style.borderBottomColor='var(--border-mid)'}
+            onBlur={e=>e.target.style.borderBottomColor='transparent'}/>
+
+          {/* Metadata */}
+          <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:12, color:'var(--faint)', marginBottom:24, lineHeight:1.6 }}>
+            {fmtDateTime(rec.createdAt)}{rec.durationSec ? ` · ${fmtDur(rec.durationSec)}` : ''}{rec.patient?.dni ? ` · DNI ${rec.patient.dni}` : ''}
+          </div>
+
+          {isError ? (
+            <div style={{ textAlign:'center', padding:'48px 0' }}>
+              <div style={{ width:56,height:56,borderRadius:14,background:'var(--danger-bg)',color:'var(--danger)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 16px' }}>
+                <Icon name="warn" size={28}/>
+              </div>
+              <div style={{ fontSize:17,fontWeight:720,marginBottom:8 }}>No se pudo procesar</div>
+              <div style={{ fontSize:13.5,color:'var(--muted)',lineHeight:1.5,marginBottom:20,maxWidth:400,margin:'0 auto 20px' }}>{rec.error||'Error durante la transcripción.'}</div>
+              <Btn icon="refresh" onClick={()=>onRetry?.(rec)}>Reintentar</Btn>
+            </div>
+          ) : isProc ? (
+            <div style={{ textAlign:'center', padding:'48px 0' }}>
+              <Spinner size={28}/><div style={{ marginTop:16,fontSize:14,color:'var(--muted)' }}>Procesando grabación…</div>
+            </div>
+          ) : (<>
+            {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract} reextracting={reextracting}/>}
+            {FIELD_SECTIONS.map(sec => {
+              const shown = sec.fields.map(([fk,label,long]) => {
+                const id = `${sec.key}.${fk}`;
+                if (id===patientKey) return null;
+                if (onlyEmpty && String(vals[id]||'').trim()) return null;
+                return (
+                  <ClinicalField key={id} id={id} label={label} long={long} value={vals[id]||''}
+                    filterMode={onlyEmpty} onChange={setField}
+                    onHover={onHoverField} hasSource={!!sources[id]}/>
+                );
+              }).filter(Boolean);
+              if (!shown.length) return null;
+              const secEmpty = sec.fields.filter(([fk])=>!String(vals[sec.key+'.'+fk]||'').trim()).length;
+              return (
+                <FieldGroup key={sec.key} icon={sec.icon} title={sec.title} emptyCount={secEmpty} filterMode={onlyEmpty}>
+                  <div style={{ display:sec.cols===2?'grid':'flex', gridTemplateColumns:sec.cols===2?'1fr 1fr':undefined, flexDirection:'column', gap:0 }}>
+                    {shown}
+                  </div>
+                </FieldGroup>
+              );
+            })}
+          </>)}
+        </div>
+      </div>
+
+      {/* Sticky footer */}
+      <div style={{ height:60, borderTop:'1px solid var(--border-subtle)', padding:'0 28px',
+        display:'flex', alignItems:'center', gap:8, flexShrink:0, background:'var(--surface)' }}>
+
+        <IconBtn name="chevL" onClick={onPrev} disabled={queuePos<=1} title="Anterior (K)"/>
+
+        {!isError && !isProc && (
+          <button type="button" onClick={()=>setOnlyEmpty(v=>!v)}
+            style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'4px 10px', borderRadius:6,
+              background:onlyEmpty?'var(--warn-bg)':'transparent',
+              border:`1px solid ${onlyEmpty?'var(--warn-border)':'var(--border-mid)'}`,
+              color:onlyEmpty?'var(--warn)':'var(--faint)', cursor:'pointer',
+              fontSize:11, fontWeight:550, fontFamily:'inherit', flexShrink:0, transition:'all 0.15s' }}>
+            Solo vacíos
+            {emptyCount > 0 && (
+              <span style={{ fontFamily:"'JetBrains Mono',monospace", fontWeight:700,
+                color:onlyEmpty?'var(--warn)':'var(--muted)' }}>{emptyCount}</span>
+            )}
+          </button>
+        )}
+
+        <div style={{ flex:1 }}/>
+
+        {!isError && !isProc && (<>
+          {dirty && (
+            <Btn variant={saveVariant} size="sm" onClick={()=>doSave(false)} disabled={save==='saving'}>{saveLabel}</Btn>
+          )}
+          {isReviewed
+            ? <Chip tone="ok">Revisada</Chip>
+            : <Btn variant="primary" size="sm" onClick={doSign} disabled={save==='saving'}>Firmar</Btn>
+          }
+        </>)}
+
+        <IconBtn name="chevR" onClick={onNext} disabled={queuePos>=pendingCount} title="Siguiente (J)"/>
+      </div>
+    </div>
+  );
+}

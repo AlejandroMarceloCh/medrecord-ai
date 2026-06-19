@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>MedRecord AI</title>
+<meta name="description" content="Graba la consulta y genera la historia clínica automáticamente." />
+<meta name="theme-color" content="#4f46e5" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="MedRecord" />
+<link rel="icon" type="image/svg+xml" href="/icon.svg" />
+<link rel="apple-touch-icon" href="/icon-180.png" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overscroll-behavior: none; }
+  body {
+    background: var(--bg, #f6f7f9);
+    font-family: 'Hanken Grotesk', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #root { height: 100dvh; }
+
+  .mr-root { font-family: 'Hanken Grotesk', system-ui, sans-serif; color: var(--text); font-size: var(--fs); line-height: 1.5; }
+  .mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-feature-settings: 'tnum'; }
+
+  .mr-root button { font-family: inherit; }
+  .mr-root :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .mr-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: var(--radius); font-weight: 600; letter-spacing: -0.01em;
+    transition: filter .15s, transform .06s; white-space: nowrap; user-select: none;
+  }
+  .mr-btn:active:not(:disabled) { transform: scale(0.985); }
+
+  .mr-iconbtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: var(--radius); cursor: pointer; transition: background .15s, color .15s;
+    background: transparent; border: none; padding: 0;
+  }
+  .mr-iconbtn:active { background: var(--surface-3); }
+
+  /* 16px evita el zoom automático de iOS al enfocar un input */
+  .mr-input {
+    width: 100%; border: 1px solid var(--border-2); border-radius: var(--radius);
+    background: var(--surface); color: var(--text); font-family: inherit;
+    font-size: 16px; padding: 13px 14px; outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  .mr-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .mr-input::placeholder { color: var(--faint); }
+
+  .mr-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+
+  .mr-spin { animation: mr-spin 0.8s linear infinite; }
+  @keyframes mr-spin { to { transform: rotate(360deg); } }
+  @keyframes mr-fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .mr-fade { animation: mr-fade .3s ease both; }
+  @keyframes mr-wave { 0%,100% { transform: scaleY(0.18); } 50% { transform: scaleY(1); } }
+  @keyframes mr-dot { 0%,100% { transform: scale(0.85); } 50% { transform: scale(1.12); } }
+  .rec-bar { width: 4px; border-radius: 4px; background: currentColor; transform-origin: center; animation: mr-wave 1.1s ease-in-out infinite; }
+
+  .mr-scroll::-webkit-scrollbar { width: 0; }
+
+</style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- icons.jsx -->
+  <script type="text/babel">
+const MR_ICON_PATHS = {
+  mic: 'M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3ZM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7',
+  stop: 'M7.5 7.5h9v9h-9z',
+  check: 'M5 12.5 10 17.5 19 6.5',
+  checkCircle: 'M21 12a9 9 0 1 1-3.2-6.9M8.5 12l2.5 2.5L17 8',
+  activity: 'M3 12h4l3 8 4-16 3 8h4',
+  arrowR: 'M5 12h14M13 6l6 6-6 6',
+  refresh: 'M20 11a8 8 0 1 0-.8 4.5M20 6v5h-5',
+  warn: 'M12 4 21 19H3L12 4ZM12 10v4M12 17.5v.2',
+  x: 'M6 6l12 12M18 6 6 18',
+};
+function Icon({ name, size = 20, stroke = 2, fill = 'none', style }) {
+  const d = MR_ICON_PATHS[name];
+  if (!d) return null;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke="currentColor"
+      strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+      {d.split('M').filter(Boolean).map((seg, i) => <path key={i} d={'M' + seg} />)}
+    </svg>
+  );
+}
+Object.assign(window, { Icon });
+  </script>
+
+  <!-- theme.jsx -->
+  <script type="text/babel">
+function computeTheme() {
+  const a = 'oklch(0.52 0.20 277)', strong = 'oklch(0.46 0.20 277)', h = 270, c = 0.008;
+  const L = (l, ch = c) => `oklch(${l} ${ch} ${h})`;
+  return {
+    '--accent': a, '--accent-strong': strong,
+    '--radius': '8px', '--radius-lg': '11px', '--fs': '15.5px',
+    '--bg': L(0.975), '--surface': '#ffffff', '--surface-2': L(0.982), '--surface-3': L(0.965),
+    '--border': L(0.915, c * 1.2), '--border-2': L(0.86, c * 1.4),
+    '--text': L(0.27, c * 2.4), '--muted': L(0.5, c * 1.8), '--faint': L(0.62, c * 1.4),
+    '--ok': 'oklch(0.55 0.13 155)', '--warn': 'oklch(0.62 0.13 65)', '--danger': 'oklch(0.55 0.20 25)',
+    '--on-accent': '#ffffff',
+    '--accent-soft': `color-mix(in oklch, ${a} 11%, #ffffff)`,
+    '--accent-line': `color-mix(in oklch, ${a} 28%, #ffffff)`,
+  };
+}
+window.MRTHEME = { computeTheme };
+  </script>
+
+  <!-- ui.jsx -->
+  <script type="text/babel">
+function Btn({ children, onClick, disabled, full, style, icon }) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} className="mr-btn"
+      style={{ height: 52, fontSize: 16, padding: '0 22px', gap: 9, width: full ? '100%' : undefined,
+        background: 'var(--accent)', color: 'var(--on-accent)', border: '1px solid transparent',
+        opacity: disabled ? 0.45 : 1, cursor: disabled ? 'not-allowed' : 'pointer', ...style }}>
+      {icon && <Icon name={icon} size={19} />}{children}
+    </button>
+  );
+}
+function Spinner({ size = 16, color = 'currentColor' }) {
+  return <span className="mr-spin" style={{ width: size, height: size, border: '2px solid ' + color, borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block' }} />;
+}
+function SectionLabel({ children }) {
+  return <div style={{ fontSize: 11.5, fontWeight: 650, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--faint)', marginBottom: 10 }}>{children}</div>;
+}
+Object.assign(window, { Btn, Spinner, SectionLabel });
+  </script>
+
+  <!-- queue.js — persiste el audio en IndexedDB para que NUNCA se pierda una grabación -->
+  <script>
+(function () {
+  const DB = 'medrecord-queue', STORE = 'pending', VER = 1;
+  function open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open(DB, VER);
+      r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains(STORE)) r.result.createObjectStore(STORE, { keyPath: 'localId' }); };
+      r.onsuccess = () => res(r.result);
+      r.onerror   = () => rej(r.error);
+    });
+  }
+  function tx(mode, fn) {
+    return open().then(db => new Promise((res, rej) => {
+      const t = db.transaction(STORE, mode), store = t.objectStore(STORE);
+      const out = fn(store);
+      t.oncomplete = () => res(out instanceof IDBRequest ? out.result : out);
+      t.onerror    = () => rej(t.error);
+    }));
+  }
+  window.MRQueue = {
+    supported: !!window.indexedDB,
+    put: (item)   => tx('readwrite', s => s.put(item)),
+    del: (localId)=> tx('readwrite', s => s.delete(localId)),
+    get: (localId)=> tx('readonly',  s => s.get(localId)),
+    all: ()       => tx('readonly',  s => s.getAll()),
+  };
+})();
+  </script>
+
+  <!-- recorder.jsx — la única pantalla del móvil: grabar y subir -->
+  <script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+function fmt(s) { const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, '0')}`; }
+
+// Onda animada durante la grabación.
+function Waveform({ active }) {
+  const bars = 28;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, height: 130, color: 'color-mix(in oklch, var(--accent) 80%, #fff)' }}>
+      {Array.from({ length: bars }).map((_, i) => {
+        const mid = Math.abs(i - bars / 2) / (bars / 2);
+        const h = (1 - mid * 0.55) * 110 + 10;
+        return <div key={i} className="rec-bar" style={{ height: h,
+          animationDelay: `${(i % 7) * 0.13 + i * 0.02}s`, animationDuration: `${0.9 + (i % 5) * 0.12}s`,
+          animationPlayState: active ? 'running' : 'paused', opacity: active ? 1 : 0.25 }} />;
+      })}
+    </div>
+  );
+}
+
+function apiFetch(url, opts = {}) {
+  const token = localStorage.getItem('medrecord.token');
+  if (!token) return fetch(url, opts);
+  const headers = new Headers(opts.headers || {});
+  headers.set('Authorization', 'Bearer ' + token);
+  return fetch(url, { ...opts, headers });
+}
+
+function pickMime() {
+  if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+  for (const c of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg']) if (MediaRecorder.isTypeSupported(c)) return c;
+  return '';
+}
+function extFor(mime) {
+  if (mime.includes('webm')) return 'webm'; if (mime.includes('mp4')) return 'mp4';
+  if (mime.includes('aac')) return 'aac'; if (mime.includes('ogg')) return 'ogg'; return 'webm';
+}
+
+// Estado visible de cada audio de la sesión.
+const PHASE = {
+  queued:       { c: 'var(--muted)',         t: 'En cola…',                 spin: true },
+  uploading:    { c: 'var(--muted)',         t: 'Subiendo…',                spin: true },
+  transcribing: { c: 'var(--accent-strong)', t: 'Transcribiendo…',          spin: true },
+  filling:      { c: 'var(--accent-strong)', t: 'Completando campos…',      spin: true },
+  ready:        { c: 'var(--ok)',             t: 'Listo · revísalo en la web', spin: false, icon: 'checkCircle' },
+  upload_error: { c: 'var(--danger)',         t: 'No se pudo subir',          spin: false },
+  proc_error:   { c: 'var(--danger)',         t: 'No se pudo procesar',       spin: false },
+};
+
+// Mapea el estado del backend a la fase visible del móvil.
+const STATUS_PHASE = { received:'transcribing', processing:'transcribing', filling:'filling', done:'ready', reviewed:'ready', error:'proc_error' };
+const TERMINAL = new Set(['ready', 'proc_error']);
+const MAX_TRIES = 6;
+
+// Últimos pacientes grabados (para no reescribir nombre/DNI cada vez).
+const RECENT_KEY = 'mr.recentPatients';
+function loadRecent() { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; } }
+function pushRecent(p) {
+  if (!p.name) return;
+  const list = loadRecent().filter(x => !(x.name === p.name && x.dni === p.dni));
+  list.unshift({ name: p.name, dni: p.dni || '' });
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 5))); } catch { /* noop */ }
+}
+function PhaseRow({ phase }) {
+  const s = PHASE[phase] || PHASE.uploading;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, fontWeight: 600, color: s.c, flexShrink: 0, textAlign: 'right' }}>
+      {s.spin && <Spinner size={13} />}
+      {s.icon && <Icon name={s.icon} size={15} />}
+      {s.t}
+    </span>
+  );
+}
+
+function MRecorder() {
+  const [name, setName] = useState('');
+  const [dni, setDni] = useState('');
+  const [phase, setPhase] = useState('idle'); // idle | recording
+  const [sec, setSec] = useState(0);
+  const [items, setItems] = useState([]);
+  const [error, setError] = useState('');
+  const [online, setOnline] = useState(navigator.onLine !== false);
+  const [recent, setRecent] = useState(loadRecent);
+  const [pausedWarn, setPausedWarn] = useState(false);
+
+  const recRef = useRef(null);
+  const chunksRef = useRef([]);
+  const streamRef = useRef(null);
+  const metaRef = useRef(null);
+  const wakeRef = useRef(null);
+  const wsRef = useRef(null);
+  const wsBackoff = useRef(1000);
+  const wsStop = useRef(false);
+  const timers = useRef({});
+  const itemsRef = useRef([]);
+  itemsRef.current = items;
+
+  const dniValid = dni === '' || dni.length === 8;
+  const canRecord = name.trim().length > 0 && dniValid;
+  const secure = typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+
+  useEffect(() => {
+    if (phase !== 'recording') return;
+    const id = setInterval(() => setSec(s => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
+
+  // Wake Lock: evita que la pantalla se apague (y corte la grabación) en mitad de la consulta.
+  const acquireWake = async () => { try { if (navigator.wakeLock) wakeRef.current = await navigator.wakeLock.request('screen'); } catch { /* noop */ } };
+  const releaseWake = () => { try { wakeRef.current && wakeRef.current.release(); } catch { /* noop */ } wakeRef.current = null; };
+  useEffect(() => {
+    const onVis = () => { if (phase === 'recording' && document.visibilityState === 'visible') acquireWake(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [phase]);
+
+  const syncItem     = useCallback((localId, patch)  => setItems(list => list.map(it => it.localId === localId ? { ...it, ...patch } : it)), []);
+  const syncByServer = useCallback((serverId, patch) => setItems(list => list.map(it => it.serverId === serverId ? { ...it, ...patch } : it)), []);
+
+  // Consulta puntual del estado de una grabación ya subida (recupera eventos WS perdidos).
+  const syncStatusOnce = useCallback(async (serverId) => {
+    try {
+      const r = await apiFetch('/api/recordings/' + serverId);
+      if (!r.ok) return;
+      const d = await r.json();
+      const ph = STATUS_PHASE[d.status];
+      if (!ph) return;
+      syncByServer(serverId, { phase: ph, msg: d.error || '' });
+      if (TERMINAL.has(ph)) { const it = itemsRef.current.find(x => x.serverId === serverId); if (it) MRQueue.del(it.localId).catch(() => {}); }
+    } catch { /* noop */ }
+  }, [syncByServer]);
+
+  // WebSocket: el backend empuja el estado en vivo (reemplaza el polling ciego).
+  const ensureWs = useCallback(() => {
+    if (wsRef.current && (wsRef.current.readyState === 0 || wsRef.current.readyState === 1)) return;
+    let ws;
+    try { ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host); } catch { return; }
+    wsRef.current = ws;
+    ws.onopen = () => {
+      wsBackoff.current = 1000;
+      for (const it of itemsRef.current) if (it.serverId && !TERMINAL.has(it.phase)) syncStatusOnce(it.serverId);
+    };
+    ws.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      const r = m.recording; if (!r || !r.id) return;
+      const ph = STATUS_PHASE[r.status]; if (!ph) return;
+      syncByServer(r.id, { phase: ph, msg: r.error || '' });
+      if (TERMINAL.has(ph)) { const it = itemsRef.current.find(x => x.serverId === r.id); if (it) MRQueue.del(it.localId).catch(() => {}); }
+    };
+    ws.onerror = () => { try { ws.close(); } catch { /* noop */ } };
+    ws.onclose = () => { wsRef.current = null; if (wsStop.current) return; setTimeout(ensureWs, wsBackoff.current); wsBackoff.current = Math.min(10000, wsBackoff.current * 2); };
+  }, [syncByServer, syncStatusOnce]);
+
+  // Sube un audio guardado en IndexedDB. Reintenta con backoff; nunca descarta el blob hasta confirmar.
+  const tryUpload = useCallback(async (localId) => {
+    let rec; try { rec = await MRQueue.get(localId); } catch { return; }
+    if (!rec) return;                               // ya subido y borrado
+    if (rec.uploaded) { ensureWs(); syncStatusOnce(rec.serverId); return; }
+    if (navigator.onLine === false) { syncItem(localId, { phase: 'queued', msg: 'sin conexión' }); return; }
+
+    syncItem(localId, { phase: 'uploading', msg: '' });
+    try {
+      const fd = new FormData();
+      fd.append('patientName', rec.meta.name);
+      fd.append('patientDni', rec.meta.dni);
+      fd.append('durationSec', String(rec.dur));
+      fd.append('audio', rec.blob, `consulta.${extFor(rec.type)}`);
+      const res = await apiFetch('/api/recordings', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error('upload');
+      const data = await res.json().catch(() => ({}));
+      const serverId = data.id || localId;
+      // El server ya tiene el audio en disco: liberamos el blob pero conservamos el registro para mostrar estado.
+      await MRQueue.put({ ...rec, blob: undefined, uploaded: true, serverId }).catch(() => {});
+      syncItem(localId, { serverId, phase: 'transcribing', msg: '' });
+      ensureWs(); syncStatusOnce(serverId);
+    } catch {
+      const tries = (rec.tries || 0) + 1;
+      await MRQueue.put({ ...rec, tries }).catch(() => {});
+      if (tries < MAX_TRIES && navigator.onLine !== false) {
+        const delay = Math.min(30000, 1000 * Math.pow(2, tries - 1));
+        syncItem(localId, { phase: 'queued', msg: 'reintentando…' });
+        clearTimeout(timers.current[localId]);
+        timers.current[localId] = setTimeout(() => tryUpload(localId), delay);
+      } else {
+        syncItem(localId, { phase: 'upload_error' });
+      }
+    }
+  }, [ensureWs, syncItem, syncStatusOnce]);
+
+  // Reencola todo lo pendiente en IndexedDB (al cargar la app o al recuperar la conexión).
+  const resumeAll = useCallback(async () => {
+    let recs; try { recs = await MRQueue.all(); } catch { return; }
+    if (!recs || !recs.length) return;
+    recs.sort((a, b) => b.createdAt - a.createdAt);
+    setItems(list => {
+      const known = new Set(list.map(i => i.localId));
+      const restored = recs.filter(r => !known.has(r.localId)).map(r => ({
+        localId: r.localId, serverId: r.serverId || null, displayName: r.meta.name || 'Paciente',
+        dur: r.dur, phase: r.uploaded ? 'transcribing' : 'queued', msg: '',
+      }));
+      return [...restored, ...list];
+    });
+    for (const r of recs) { if (r.uploaded) { ensureWs(); syncStatusOnce(r.serverId); } else { tryUpload(r.localId); } }
+  }, [ensureWs, syncStatusOnce, tryUpload]);
+
+  // Guarda el audio en IndexedDB ANTES de intentar subirlo (esto es lo que evita perderlo).
+  const enqueue = useCallback(async (blob, type, meta, dur) => {
+    const localId = 'L' + Date.now() + Math.floor(Math.random() * 1000);
+    const rec = { localId, serverId: null, uploaded: false, blob, type, meta, dur, createdAt: Date.now(), tries: 0 };
+    try { await MRQueue.put(rec); } catch { /* noop */ }
+    setItems(list => [{ localId, serverId: null, displayName: meta.name || 'Paciente', dur, phase: 'queued', msg: '' }, ...list]);
+    pushRecent(meta); setRecent(loadRecent());
+    tryUpload(localId);
+  }, [tryUpload]);
+
+  // Montaje: conecta WS, recupera pendientes, escucha online/offline.
+  useEffect(() => {
+    wsStop.current = false;
+    ensureWs();
+    resumeAll();
+    const onOnline  = () => { setOnline(true);  resumeAll(); };
+    const onOffline = () => setOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      wsStop.current = true;
+      try { wsRef.current && wsRef.current.close(); } catch { /* noop */ }
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      Object.values(timers.current).forEach(clearTimeout);
+    };
+  }, []); // eslint-disable-line
+
+  const startRecording = async () => {
+    setError(''); setPausedWarn(false);
+    if (!secure) { setError('La grabación necesita una conexión segura (https). Abre la app por el enlace https en tu celular.'); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mime = pickMime();
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      chunksRef.current = [];
+      metaRef.current = { name: name.trim(), dni: dni.trim() };
+      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); };
+      // iOS puede pausar al bloquear pantalla: reanudamos y avisamos.
+      rec.onpause = () => { try { rec.resume(); } catch { /* noop */ } setPausedWarn(true); };
+      rec.onstop = () => {
+        const type = rec.mimeType || mime || 'audio/webm';
+        const blob = new Blob(chunksRef.current, { type });
+        (streamRef.current ? streamRef.current.getTracks() : []).forEach(t => t.stop());
+        streamRef.current = null;
+        releaseWake();
+        setSec(dur => {
+          const meta = metaRef.current;
+          if (blob.size > 0) enqueue(blob, type, meta, dur);
+          setName(''); setDni('');
+          return 0;
+        });
+      };
+      setSec(0);
+      rec.start();
+      recRef.current = rec;
+      setPhase('recording');
+      acquireWake();
+    } catch (err) {
+      setError(err && err.name === 'NotAllowedError'
+        ? 'Diste permiso de micrófono denegado. Actívalo en los ajustes del navegador.'
+        : 'No se pudo acceder al micrófono.');
+    }
+  };
+
+  const stopRecording = () => {
+    const rec = recRef.current;
+    if (rec && rec.state !== 'inactive') rec.stop();
+    setPhase('idle');
+  };
+
+  // Aviso al cerrar mientras se graba (perdería el audio en curso).
+  useEffect(() => {
+    const h = (e) => { if (phase === 'recording') { e.preventDefault(); e.returnValue = ''; } };
+    window.addEventListener('beforeunload', h);
+    return () => window.removeEventListener('beforeunload', h);
+  }, [phase]);
+
+  // ── Pantalla inmersiva de grabación ──
+  if (phase === 'recording') {
+    return (
+      <div style={{ position: 'absolute', inset: 0, background: '#0c0e12', color: '#fff', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <div style={{ width: '100%', display: 'flex', justifyContent: 'center', padding: 'calc(env(safe-area-inset-top, 0px) + 40px) 18px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, opacity: 0.85 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 8, background: 'oklch(0.62 0.2 25)', animation: 'mr-dot 1.4s infinite' }} />
+            <span style={{ fontSize: 13, letterSpacing: '0.04em', color: 'rgba(255,255,255,0.75)' }}>Grabando</span>
+          </div>
+        </div>
+        <div style={{ textAlign: 'center', marginTop: 26 }}>
+          <div style={{ fontSize: 18, fontWeight: 650 }}>{name.trim() || 'Paciente'}</div>
+          <div style={{ fontSize: 13.5, color: 'rgba(255,255,255,0.45)', marginTop: 4 }}>Consulta en curso</div>
+        </div>
+        {pausedWarn && (
+          <div style={{ marginTop: 16, padding: '9px 14px', borderRadius: 10, fontSize: 12.5, maxWidth: 320, textAlign: 'center',
+            background: 'rgba(255,255,255,0.10)', color: 'rgba(255,255,255,0.85)' }}>
+            La grabación se pausó (¿bloqueaste la pantalla?). Mantén la app abierta y visible.
+          </div>
+        )}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
+          <Waveform active />
+          <div className="mono" style={{ fontSize: 30, fontWeight: 500, marginTop: 30, letterSpacing: '0.02em' }}>{fmt(sec)}</div>
+        </div>
+        <div style={{ paddingBottom: 'calc(46px + env(safe-area-inset-bottom, 0px))', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
+          <button type="button" onClick={stopRecording} aria-label="Terminar y enviar"
+            style={{ width: 78, height: 78, borderRadius: 999, border: '5px solid rgba(255,255,255,0.16)', background: 'oklch(0.58 0.2 25)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+            <Icon name="stop" size={30} fill="#fff" stroke={0} style={{ color: '#fff' }} />
+          </button>
+          <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)' }}>Toca para terminar y enviar</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Pantalla principal ──
+  return (
+    <div className="mr-scroll" style={{ position: 'absolute', inset: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ width: '100%', maxWidth: 480, margin: '0 auto', padding: '0 18px', display: 'flex', flexDirection: 'column', flex: 1 }}>
+        <div style={{ height: 'max(40px, calc(env(safe-area-inset-top, 0px) + 16px))', flexShrink: 0 }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 24 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 11, background: 'var(--accent)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 14px color-mix(in oklch, var(--accent) 40%, transparent)' }}>
+            <Icon name="activity" size={22} stroke={2.4} />
+          </div>
+          <div>
+            <div style={{ fontSize: 19, fontWeight: 760, letterSpacing: '-0.02em', lineHeight: 1.1 }}>Grabar consulta</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)' }}>MedRecord AI</div>
+          </div>
+        </div>
+
+        {!online && (
+          <div style={{ marginBottom: 14, padding: '10px 13px', borderRadius: 11, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8,
+            background: 'color-mix(in oklch, var(--warn) 12%, transparent)', color: 'var(--warn)',
+            border: '1px solid color-mix(in oklch, var(--warn) 30%, transparent)' }}>
+            <Icon name="warn" size={15} />
+            Sin conexión. Tus grabaciones se guardan y se suben solas al volver.
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label style={lbl}>Nombre del paciente</label>
+            <input className="mr-input" value={name} onChange={e => setName(e.target.value)}
+              autoCapitalize="words" autoComplete="off" autoCorrect="off" placeholder="Ej. María Pérez" />
+            {name.trim() === '' && recent.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                {recent.map((p, i) => (
+                  <button key={i} type="button" onClick={() => { setName(p.name); setDni(p.dni || ''); }}
+                    style={{ height: 30, padding: '0 11px', borderRadius: 999, fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
+                      background: 'var(--surface-3)', color: 'var(--muted)', border: '1px solid var(--border-2)', maxWidth: '100%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <label style={lbl}>DNI <span style={{ color: 'var(--faint)', fontWeight: 400 }}>(opcional)</span></label>
+            <input className="mr-input" value={dni} onChange={e => setDni(e.target.value.replace(/\D/g, '').slice(0, 8))}
+              inputMode="numeric" maxLength={8} placeholder="Ej. 70123456" />
+            {dni !== '' && !dniValid && <div style={{ fontSize: 12.5, color: 'var(--danger)', marginTop: 6 }}>El DNI peruano tiene 8 dígitos.</div>}
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 12, fontSize: 13.5, lineHeight: 1.45,
+            background: 'color-mix(in oklch, var(--danger) 10%, transparent)', color: 'var(--danger)',
+            border: '1px solid color-mix(in oklch, var(--danger) 28%, transparent)' }}>{error}</div>
+        )}
+
+        <Btn full icon="mic" onClick={startRecording} disabled={!canRecord} style={{ marginTop: 22, borderRadius: 'var(--radius-lg)', height: 56 }}>Iniciar grabación</Btn>
+        {!canRecord && !error && <div style={{ fontSize: 12.5, color: 'var(--faint)', textAlign: 'center', marginTop: 8 }}>Ingresa el nombre del paciente para empezar.</div>}
+
+        {items.length > 0 && (
+          <div style={{ marginTop: 30 }}>
+            <SectionLabel>Audios de esta sesión</SectionLabel>
+            {items.map(it => (
+              <div key={it.localId} className="mr-card" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 13, marginBottom: 8 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 11, background: 'var(--accent-soft)', color: 'var(--accent-strong)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Icon name="activity" size={20} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 650, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.displayName}</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>{fmt(it.dur)} de audio{it.msg ? ' · ' + it.msg : ''}</div>
+                </div>
+                {it.phase === 'upload_error'
+                  ? <button type="button" onClick={() => tryUpload(it.localId)} className="mr-btn" style={{ height: 34, padding: '0 12px', gap: 6, fontSize: 13, background: 'transparent', color: 'var(--accent-strong)', border: '1px solid var(--accent-line)' }}><Icon name="refresh" size={15} /> Reintentar</button>
+                  : <PhaseRow phase={it.phase} />}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ height: 40 }} />
+      </div>
+    </div>
+  );
+}
+const lbl = { display: 'block', fontSize: 12.5, fontWeight: 600, color: 'var(--muted)', marginBottom: 6 };
+
+function MobileRoot() {
+  const themeVars = MRTHEME.computeTheme();
+  return (
+    <div className="mr-root" style={{ ...themeVars, height: '100dvh', width: '100%', overflow: 'hidden', position: 'relative', background: 'var(--bg)' }}>
+      <MRecorder />
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<MobileRoot />);
+  </script>
+</body>
+</html>

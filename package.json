@@ -1,0 +1,30 @@
+{
+  "name": "medrecord-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MedRecord AI — graba la consulta, transcribe y genera la historia clínica.",
+  "scripts": {
+    "dev:bundle": "node build.mjs --watch",
+    "dev:server": "PORT=3331 node server.js",
+    "dev": "node build.mjs --watch & PORT=3331 node server.js",
+    "build": "node build.mjs",
+    "start": "NODE_ENV=production node server.js",
+    "preview": "npm run build && npm start",
+    "test": "for f in test/sprint3_evidence.mjs test/sprint4_export.mjs test/sprint5_security.mjs test/sprint6_autofill_backup.mjs; do echo \"=== $f ===\"; node \"$f\" || exit 1; done"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "express": "^4.18.2",
+    "multer": "^2.1.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12",
+    "playwright": "^1.61.0"
+  }
+}
