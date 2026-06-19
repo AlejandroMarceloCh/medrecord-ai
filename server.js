@@ -9,13 +9,17 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { transcribe, checkEnv } = require('./whisper');
 const llm = require('./llm');
+const enc = require('./crypto');
+
+// Para logs: nunca imprimas el id completo ni PII, solo un prefijo no identificable.
+const shortId = (id) => String(id || '').slice(0, 8);
 
 const PROD = process.env.NODE_ENV === 'production';
 const distDir = path.join(__dirname, 'dist');
 // Producción sirve dist/ (JSX precompilado); dev sirve public/ (Babel en navegador).
 const STATIC_DIR = PROD && fs.existsSync(distDir) ? distDir : path.join(__dirname, 'public');
 
-const DATA_DIR = path.join(__dirname, 'data', 'recordings');
+const DATA_DIR = process.env.MEDRECORD_DATA_DIR || path.join(__dirname, 'data', 'recordings');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // Dirección LAN (para que la web muestre el enlace al móvil en el estado vacío).
@@ -36,13 +40,26 @@ function metaPath(id) { return path.join(DATA_DIR, id + '.json'); }
 function persist(rec) {
   if (!recordings.has(rec.id)) return;
   const dest = metaPath(rec.id);
-  const tmp  = dest + '.tmp';
   try {
-    fs.writeFileSync(tmp, JSON.stringify(rec));
-    fs.renameSync(tmp, dest);
+    enc.writeEncrypted(dest, JSON.stringify(rec));   // AES-256-GCM, atómico (temp+rename)
   } catch (err) {
-    console.error('No se pudo persistir', rec.id, err.message);
-    try { fs.unlinkSync(tmp); } catch {}
+    console.error('No se pudo persistir', shortId(rec.id), err.message);
+    try { fs.unlinkSync(dest + '.tmp'); } catch {}
+  }
+}
+
+// Descifra el audio a un archivo temporal para pasarlo a ffmpeg/whisper y lo borra
+// al terminar. Para grabaciones legacy (en claro) usa la ruta directa.
+async function withAudioFile(rec, fn) {
+  const stored = path.join(DATA_DIR, rec.audioFile);
+  if (!rec.audioEnc) return fn(stored);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'medrec-audio-'));
+  const tmpFile = path.join(tmpDir, 'audio');
+  try {
+    fs.writeFileSync(tmpFile, enc.readEncrypted(stored));
+    return await fn(tmpFile);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
@@ -52,10 +69,17 @@ function loadAll() {
   let files = [];
   try { files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json')); } catch { /* noop */ }
   for (const f of files) {
+    const fp = path.join(DATA_DIR, f);
     try {
-      const rec = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), 'utf8'));
-      if (rec && rec.id) recordings.set(rec.id, rec);
-    } catch (err) { console.error('Sidecar corrupto', f, err.message); }
+      let json, wasEncrypted = true;
+      try { json = enc.readEncrypted(fp).toString('utf8'); }
+      catch { json = fs.readFileSync(fp, 'utf8'); wasEncrypted = false; }  // sidecar legacy en claro
+      const rec = JSON.parse(json);
+      if (rec && rec.id) {
+        recordings.set(rec.id, rec);
+        if (!wasEncrypted) { try { enc.writeEncrypted(fp, JSON.stringify(rec)); } catch { /* noop */ } } // migra a cifrado
+      }
+    } catch { console.error('Sidecar corrupto (omitido):', shortId(f)); }  // sin err.message: puede traer contenido
   }
   // Reanudar las que quedaron en un estado intermedio.
   for (const rec of recordings.values()) {
@@ -108,20 +132,21 @@ if (REQUIRED_TOKEN) {
 }
 
 // ── Subida de audio desde el móvil ──
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, DATA_DIR),
-  filename: (req, file, cb) => {
-    const id = crypto.randomUUID();
-    req._recId = id;
-    const ext = (path.extname(file.originalname || '') || '.webm').toLowerCase();
-    cb(null, id + ext);
-  },
-});
-const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
+// memoryStorage: el audio entra a RAM y se cifra antes de tocar el disco; nunca
+// queda en claro en data/. Para audios grandes esto usa memoria proporcional al
+// tamaño (límite 100 MB), aceptable para una consulta a la vez.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
 app.post('/api/recordings', upload.single('audio'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'falta el audio' });
-  const id = req._recId;
+  const id = crypto.randomUUID();
+  const audioFile = id + '.audio';
+  try {
+    enc.writeEncrypted(path.join(DATA_DIR, audioFile), req.file.buffer);   // cifrado en reposo
+  } catch (err) {
+    console.error('No se pudo guardar el audio', shortId(id), err.message);
+    return res.status(500).json({ error: 'no se pudo guardar el audio' });
+  }
   const rec = {
     id,
     patient: { name: (req.body.patientName || '').trim(), dni: (req.body.patientDni || '').trim() },
@@ -133,7 +158,9 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
     sources: null,
     fieldsError: null,
     reviewed: false,
-    audioFile: req.file.filename,
+    audioFile,
+    audioMime: req.file.mimetype || 'audio/webm',
+    audioEnc: true,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -142,7 +169,7 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
   res.json({ id, status: rec.status });
 
   broadcast({ type: 'recording:received', recording: publicRec(rec) });
-  processRecording(rec).catch(() => {});
+  processRecording(rec).catch((e) => { console.error('proc error', shortId(id), e.message); });
 });
 
 // Mínimo de caracteres para considerar una transcripción válida (filtra silencio/ruido).
@@ -162,7 +189,7 @@ async function processRecording(rec) {
   setStatus(rec, 'processing', 'recording:processing');
   let text;
   try {
-    ({ text } = await transcribe(path.join(DATA_DIR, rec.audioFile)));
+    ({ text } = await withAudioFile(rec, (p) => transcribe(p)));
     rec.transcript = text;
   } catch (err) {
     rec.error = String(err.message || err);
@@ -216,8 +243,16 @@ app.get('/api/recordings/:id', (req, res) => {
 });
 app.get('/api/recordings/:id/audio', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r) return res.sendStatus(404);
-  res.sendFile(path.join(DATA_DIR, r.audioFile));
+  if (!r || !r.audioFile) return res.sendStatus(404);
+  const fp = path.join(DATA_DIR, r.audioFile);
+  if (!r.audioEnc) return res.sendFile(fp);   // legacy en claro
+  try {
+    res.setHeader('Content-Type', r.audioMime || 'audio/webm');
+    res.send(enc.readEncrypted(fp));
+  } catch (err) {
+    console.error('No se pudo leer el audio', shortId(r.id), err.message);
+    res.sendStatus(404);
+  }
 });
 
 // ── Escritura: guardar revisión del médico ──

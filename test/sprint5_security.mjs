@@ -9,13 +9,18 @@
 //
 // Uso: node test/sprint5_security.mjs   (no necesita Ollama)
 import { spawn }       from 'node:child_process';
-import { writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { writeFileSync, existsSync, readdirSync, rmSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { tmpdir }      from 'node:os';
 import { join }        from 'node:path';
 
 const PORT  = 3401;
 const BASE  = `http://localhost:${PORT}`;
 const TOKEN = 's5-test-token';
-const DIR   = join(process.cwd(), 'data', 'recordings');
+// Aislado en dir temporal: la suite no toca data/ real (que ahora va cifrada).
+const WORK  = mkdtempSync(join(tmpdir(), 'medrec-s5-'));
+const DIR   = join(WORK, 'recordings');
+const KEY   = join(WORK, 'master.key');
+mkdirSync(DIR, { recursive: true });
 const ID    = 'sprint5-demo';
 const SIDECAR = join(DIR, ID + '.json');
 
@@ -45,7 +50,8 @@ const add = (name, ok, detail) => results.push({ name, ok, detail });
 writeFileSync(SIDECAR, JSON.stringify(demo));
 // Server arranca con MEDRECORD_TOKEN seteado → auth activo
 const srv = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_TOKEN: TOKEN },
+  env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_TOKEN: TOKEN,
+         MEDRECORD_DATA_DIR: DIR, MEDRECORD_KEY_FILE: KEY },
   stdio: 'ignore',
 });
 
@@ -84,7 +90,7 @@ try {
   add('ejecución', false, String(e.message));
 } finally {
   srv.kill('SIGKILL');
-  try { rmSync(SIDECAR, { force: true }); } catch {}
+  try { rmSync(WORK, { recursive: true, force: true }); } catch {}
 }
 
 console.log('\nSprint 5 — test al goal "auth + atomic writes + sin PII":\n');
