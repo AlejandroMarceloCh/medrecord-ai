@@ -5,26 +5,41 @@ import { FIELD_SECTIONS } from './constants.js';
 import { recName, fmtDateTime, fmtDur, countEmpty, flattenFields, unflattenVals, applyDict, apiFetch } from './helpers.js';
 
 // ── ClinicalField ────────────────────────────────────────────────────────────
-export function ClinicalField({ id, label, value, long, filterMode, onChange, onHover, hasSource }) {
+// needsConfirm: campo poblado por IA que el médico aún no confirmó ni editó.
+// Se resalta y exige una acción explícita antes de poder firmar (human-in-the-loop).
+export function ClinicalField({ id, label, value, long, filterMode, onChange, onHover, hasSource, needsConfirm, onConfirm }) {
   const [focus, setFocus] = useState(false);
   const empty = !String(value||'').trim();
   const warn  = filterMode && empty;
+  const flag  = needsConfirm && !warn;   // resalte de "confirmar IA"
   const Input = long ? 'textarea' : 'input';
+  const pad = (warn || flag) ? '10px 8px' : '10px 0';
   return (
     <div
       onMouseEnter={hasSource ? () => onHover?.(id) : undefined}
       onMouseLeave={hasSource ? () => onHover?.(null) : undefined}
-      style={{ padding: warn ? '10px 8px' : '10px 0',
-        margin: warn ? '0 -8px' : 0, borderRadius: warn ? 6 : 0,
+      style={{ padding: pad,
+        margin: (warn || flag) ? '0 -8px' : 0, borderRadius: (warn || flag) ? 6 : 0,
+        borderLeft: flag ? '2px solid var(--accent)' : undefined,
         borderBottom:`1px solid ${focus?'var(--accent)':warn?'var(--warn-border)':'var(--border-subtle)'}`,
         transition:'border-color 0.12s, background 0.12s',
-        background: warn ? 'var(--warn-bg)' : 'transparent' }}>
+        background: warn ? 'var(--warn-bg)' : flag ? 'var(--accent-soft)' : 'transparent' }}>
       <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:4 }}>
         {empty && <span style={{ width:5, height:5, borderRadius:'50%', background:'var(--warn-dot)', flexShrink:0 }}/>}
         <label style={{ fontSize:10.5, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase',
           color:empty?'var(--warn)':'var(--faint)', cursor:hasSource?'help':'default' }}>{label}</label>
         {hasSource && <span title="Pasa el cursor para ver la fuente en la transcripción"
           style={{ width:5, height:5, borderRadius:'50%', background:'var(--accent)', flexShrink:0, opacity:0.7 }}/>}
+        <div style={{ flex:1 }}/>
+        {flag && (
+          <button type="button" onClick={()=>onConfirm?.(id)}
+            title="Marcar este campo como revisado"
+            style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'2px 8px', borderRadius:5,
+              background:'var(--accent)', color:'#fff', border:'none', cursor:'pointer',
+              fontSize:10.5, fontWeight:700, fontFamily:'inherit', flexShrink:0 }}>
+            <Icon name="check" size={11} stroke={3}/> Confirmar
+          </button>
+        )}
       </div>
       <Input value={value||''} onChange={e=>onChange(id,e.target.value)}
         onFocus={()=>setFocus(true)} onBlur={()=>setFocus(false)}
@@ -67,7 +82,7 @@ export function FieldGroup({ icon, title, children, emptyCount, filterMode }) {
 }
 
 // ── AiBanner ─────────────────────────────────────────────────────────────────
-export function AiBanner({ rec, emptyCount, onReextract, reextracting }) {
+export function AiBanner({ rec, emptyCount, onReextract, reextracting, pendingConfirm }) {
   let bg, bd, fg, msg, spin=false, action=null;
   if (rec.status==='filling'||reextracting) {
     bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
@@ -78,17 +93,27 @@ export function AiBanner({ rec, emptyCount, onReextract, reextracting }) {
     action=<Btn variant="soft" size="sm" icon="refresh" onClick={onReextract}>Reintentar</Btn>;
   } else if (rec.fields) {
     bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
-    msg=emptyCount>0?`Campos pre-llenados por IA. ${emptyCount} por completar.`:'Campos pre-llenados por IA. Revisa y corrige antes de firmar.';
+    msg = pendingConfirm > 0
+      ? `${pendingConfirm} campo${pendingConfirm>1?'s':''} de IA por confirmar antes de firmar.`
+      : (emptyCount>0 ? `Campos pre-llenados por IA. ${emptyCount} por completar.` : 'Campos de IA confirmados. Puedes firmar.');
   } else {
     bg='var(--warn-bg)'; bd='var(--warn-border)'; fg='var(--warn)';
     msg='Sin autollenado disponible. Completa los campos desde la transcripción.';
   }
   return (
-    <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px', marginBottom:24,
-      borderRadius:10, background:bg, border:`1px solid ${bd}`, color:fg, fontSize:13 }}>
-      {spin ? <Spinner size={14} color={fg}/> : <Icon name="sparkle" size={15} style={{ flexShrink:0 }}/>}
-      <span style={{ flex:1 }}>{msg}</span>
-      {action}
+    <div style={{ marginBottom:24 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
+        borderRadius:10, background:bg, border:`1px solid ${bd}`, color:fg, fontSize:13 }}>
+        {spin ? <Spinner size={14} color={fg}/> : <Icon name="sparkle" size={15} style={{ flexShrink:0 }}/>}
+        <span style={{ flex:1 }}>{msg}</span>
+        {action}
+      </div>
+      {/* Disclaimer clínico permanente: la responsabilidad es del médico que firma. */}
+      <div style={{ display:'flex', alignItems:'center', gap:7, marginTop:8, padding:'0 4px',
+        fontSize:11.5, color:'var(--faint)', lineHeight:1.5 }}>
+        <Icon name="warn" size={12} style={{ flexShrink:0, color:'var(--warn)' }}/>
+        <span>La IA puede equivocarse u omitir datos. Verifica cada campo contra la transcripción; al firmar, tú eres responsable del contenido.</span>
+      </div>
     </div>
   );
 }
@@ -134,7 +159,14 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
   const [dirty,  setDirty]  = useState(false);
   const [onlyEmpty, setOnlyEmpty] = useState(false);
   const [reextracting, setReextracting] = useState(false);
+  const [confirmed, setConfirmed] = useState(()=>new Set());
   const touched = useRef({});
+
+  // Campos que la IA pobló (no vacíos): son los que el médico debe confirmar o editar.
+  const iaFlat = useMemo(()=>flat(rec?.fields_ia), [rec?.fields_ia]);
+  const isAi = (id) => !!String(iaFlat[id]||'').trim();
+  const aiIds = useMemo(()=>Object.keys(iaFlat).filter(k=>String(iaFlat[k]||'').trim()), [iaFlat]);
+  const confirmField = (id) => setConfirmed(s => { const n = new Set(s); n.add(id); return n; });
 
   // Merge incoming LLM field updates without overwriting user edits
   useEffect(() => {
@@ -147,19 +179,28 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
     });
   }, [rec?.fields]);
 
-  // Reset state on rec change
+  // Reset state on rec change. Una grabación ya revisada se considera toda confirmada.
   useEffect(() => {
     setVals(flat(rec?.fields));
     setSave('idle'); setDirty(false); setOnlyEmpty(false);
     touched.current = {};
+    const already = (rec?.status==='reviewed'||rec?.reviewed) ? Object.keys(flat(rec?.fields_ia)) : (rec?.confirmed||[]);
+    setConfirmed(new Set(already));
   }, [rec?.id]);
 
   useEffect(() => {
     if (reextracting && (rec?.status==='done'||rec?.status==='reviewed')) setReextracting(false);
   }, [rec?.status, rec?.fields]);
 
-  const setField = (id, v) => { touched.current[id]=true; setVals(s=>({...s,[id]:v})); setDirty(true); setSave('idle'); };
+  // Editar un campo de IA cuenta como confirmarlo (el médico lo está atendiendo).
+  const setField = (id, v) => {
+    touched.current[id]=true; setVals(s=>({...s,[id]:v})); setDirty(true); setSave('idle');
+    if (isAi(id)) confirmField(id);
+  };
   const { empty: emptyCount } = useMemo(() => countEmpty(vals), [vals]);
+
+  // Campos de IA todavía sin confirmar ni editar → bloquean la firma.
+  const pendingConfirm = useMemo(()=>aiIds.filter(id=>!confirmed.has(id)), [aiIds, confirmed]);
 
   const doSave = async (markReviewed=false) => {
     setSave('saving');
@@ -167,6 +208,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
       const body = {
         fields: unflattenVals(vals),
         patient: { name:vals['filiacion.nombre']||(rec.patient?.name)||'', dni:vals['filiacion.documento']||(rec.patient?.dni)||'' },
+        confirmed: aiIds.filter(id=>confirmed.has(id)),
         ...(markReviewed ? { reviewed:true } : {}),
       };
       const r = await apiFetch(`/api/recordings/${rec.id}/fields`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
@@ -179,6 +221,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
   };
 
   const doSign = async () => {
+    if (pendingConfirm.length) { setSave('idle'); return; }   // guard de UI (el server revalida)
     const updated = await doSave(true);
     if (updated) onSign?.(updated);
   };
@@ -240,7 +283,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
               <Spinner size={28}/><div style={{ marginTop:16,fontSize:14,color:'var(--muted)' }}>Procesando grabación…</div>
             </div>
           ) : (<>
-            {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract} reextracting={reextracting}/>}
+            {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract} reextracting={reextracting} pendingConfirm={pendingConfirm.length}/>}
             {FIELD_SECTIONS.map(sec => {
               const shown = sec.fields.map(([fk,label,long]) => {
                 const id = `${sec.key}.${fk}`;
@@ -249,7 +292,8 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
                 return (
                   <ClinicalField key={id} id={id} label={label} long={long} value={vals[id]||''}
                     filterMode={onlyEmpty} onChange={setField}
-                    onHover={onHoverField} hasSource={!!sources[id]}/>
+                    onHover={onHoverField} hasSource={!!sources[id]}
+                    needsConfirm={!isReviewed && isAi(id) && !confirmed.has(id)} onConfirm={confirmField}/>
                 );
               }).filter(Boolean);
               if (!shown.length) return null;
@@ -295,7 +339,10 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
           )}
           {isReviewed
             ? <Chip tone="ok">Revisada</Chip>
-            : <Btn variant="primary" size="sm" onClick={doSign} disabled={save==='saving'}>Firmar</Btn>
+            : <Btn variant="primary" size="sm" onClick={doSign} disabled={save==='saving'||pendingConfirm.length>0}
+                title={pendingConfirm.length>0?`Confirma ${pendingConfirm.length} campo(s) de IA antes de firmar`:'Firmar'}>
+                {pendingConfirm.length>0 ? `Confirma ${pendingConfirm.length}` : 'Firmar'}
+              </Btn>
           }
         </>)}
 

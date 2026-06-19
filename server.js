@@ -215,10 +215,33 @@ async function processRecording(rec) {
     const ex = await llm.extractFields(text, { patient: rec.patient, date: rec.createdAt });
     rec.fields = ex.fields;
     rec.sources = ex.sources;
+    rec.fields_ia = deepCopy(ex.fields);   // snapshot intacto de lo que generó la IA (trazabilidad)
+    rec.confirmed = [];
   } catch (err) {
     rec.fieldsError = String(err.message || err);
   }
   setStatus(rec, 'done', 'recording:filled');
+}
+
+function deepCopy(o) { try { return JSON.parse(JSON.stringify(o)); } catch { return null; } }
+
+// Aplana { seccion: { campo: valor } } → { "seccion.campo": valor }.
+function flattenFields(f) {
+  const out = {};
+  if (!f || typeof f !== 'object') return out;
+  for (const sec of Object.keys(f)) {
+    const s = f[sec];
+    if (!s || typeof s !== 'object') continue;
+    for (const k of Object.keys(s)) out[sec + '.' + k] = s[k];
+  }
+  return out;
+}
+
+// Claves de campos que la IA pobló (no vacíos). Son los que el médico debe confirmar.
+function aiPopulatedKeys(fieldsIa) {
+  return Object.entries(flattenFields(fieldsIa))
+    .filter(([, v]) => String(v == null ? '' : v).trim())
+    .map(([k]) => k);
 }
 
 function publicRec(r) {
@@ -226,6 +249,7 @@ function publicRec(r) {
     id: r.id, patient: r.patient, durationSec: r.durationSec,
     status: r.status, transcript: r.transcript, fields: r.fields || null,
     sources: r.sources || null,
+    fields_ia: r.fields_ia || null, confirmed: r.confirmed || null,
     error: r.error, fieldsError: r.fieldsError || null,
     reviewed: !!r.reviewed, createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
@@ -262,13 +286,28 @@ app.put('/api/recordings/:id/fields', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r) return res.status(404).json({ error: 'no existe' });
   const fields = req.body && req.body.fields;
+  const wantReview = !!(req.body && req.body.reviewed);
+  const confirmed = Array.isArray(req.body && req.body.confirmed) ? req.body.confirmed : null;
+
+  // Human-in-the-loop: no se puede FIRMAR si algún campo poblado por la IA no fue
+  // confirmado por el médico. Guardar borrador (sin reviewed) no exige confirmación.
+  if (wantReview && r.fields_ia) {
+    const need = aiPopulatedKeys(r.fields_ia);
+    const ok = new Set(confirmed || []);
+    const pending = need.filter(k => !ok.has(k));
+    if (pending.length) {
+      return res.status(409).json({ error: 'campos de IA sin confirmar', pending });
+    }
+  }
+
   if (fields && typeof fields === 'object') r.fields = fields;
+  if (confirmed) r.confirmed = confirmed;   // qué confirmó el médico (trazabilidad)
   if (req.body && req.body.patient && typeof req.body.patient === 'object') {
     r.patient = { name: String(req.body.patient.name || '').trim(), dni: String(req.body.patient.dni || '').trim() };
   }
-  r.reviewed = true;
-  r.reviewedAt = Date.now();
-  setStatus(r, 'reviewed', 'recording:updated');
+  if (wantReview) { r.reviewed = true; r.reviewedAt = Date.now(); }
+  r.updatedAt = Date.now();
+  setStatus(r, wantReview ? 'reviewed' : r.status, 'recording:updated');
   res.json(publicRec(r));
 });
 
@@ -279,7 +318,7 @@ app.post('/api/recordings/:id/retry', (req, res) => {
   if (!r.audioFile || !fs.existsSync(path.join(DATA_DIR, r.audioFile))) {
     return res.status(409).json({ error: 'no hay audio para reprocesar' });
   }
-  r.error = null; r.fieldsError = null; r.transcript = null; r.fields = null; r.sources = null; r.reviewed = false;
+  r.error = null; r.fieldsError = null; r.transcript = null; r.fields = null; r.sources = null; r.fields_ia = null; r.confirmed = []; r.reviewed = false;
   res.json({ ok: true });
   processRecording(r).catch(() => {});
 });
@@ -295,6 +334,8 @@ app.post('/api/recordings/:id/reextract', async (req, res) => {
     const ex = await llm.extractFields(r.transcript, { patient: r.patient, date: r.createdAt });
     r.fields = ex.fields;
     r.sources = ex.sources;
+    r.fields_ia = deepCopy(ex.fields);   // nuevo snapshot de IA → reinicia confirmaciones
+    r.confirmed = [];
     r.fieldsError = null;
   } catch (err) {
     r.fieldsError = String(err.message || err);
