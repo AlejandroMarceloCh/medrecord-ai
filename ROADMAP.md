@@ -67,21 +67,26 @@ y editar → firma OK → el registro guarda `fields_ia` y `fields` distinguible
 
 ---
 
-## Sprint 9 — Auth multi-usuario + DB + concurrencia (P0.1, P1.1)
+## Sprint 9 — Auth multi-usuario + concurrencia (P0.1, P1.1) ✅
+
+**Decisión:** SQLite se mueve al Sprint 11 (escala). Los goals de este sprint
+(aislamiento, audit, optimistic lock, sesiones) se resuelven sobre el store cifrado
+actual sin agregar una dependencia nativa. Cero overengineering para un piloto.
 
 **Tareas**
-- Migrar Map+JSON → SQLite (cifrado aplicado al .db o por columna)
-- Usuarios reales: sesiones con expiración, cookie httpOnly+Secure, `/api/whoami`
-- Aislamiento: cada médico ve solo sus grabaciones; rol admin ve la clínica
-- Audit log: quién accedió/editó/firmó qué y cuándo
-- Optimistic locking: `version` por registro; PUT con versión vieja → 409
+- `auth.js`: usuarios cifrados (scrypt stdlib), sesiones en memoria, cookie HttpOnly
+  (+Secure en prod), audit log JSONL sin PII. `/api/login` `/api/logout` `/api/whoami`
+  `/api/users` (admin). Admin inicial por env `MEDRECORD_ADMIN_USER/PASS`.
+- Aislamiento: `ownerId` por grabación; el médico ve solo las suyas, admin ve todo.
+- Audit log: login/create/edit/sign/delete con userId + recId (sin PII).
+- Optimistic locking: `version` por registro; PUT con versión vieja → 409.
+- Web: `LoginGate` + pantalla de login + cerrar sesión en Ajustes.
 
 **Goal:** dos médicos en paralelo no se pisan datos ni se ven entre sí; toda acción
 queda auditada; robar el token de uno no expone a los demás.
 
-**Test** `sprint9_multiuser.mjs`: A no ve grabaciones de B; dos PUT concurrentes al
-mismo registro → el segundo recibe 409; el audit log registró cada acción con su
-usuario.
+**Test** `sprint9_multiuser.mjs`: 7/7 — sin sesión 401, aislamiento A↔B, admin ve
+todo, acceso cruzado 404, segundo PUT con versión vieja 409, audit con userId correcto.
 
 ---
 
@@ -106,6 +111,7 @@ irrecuperable.
 ## Sprint 11 — Escala + interoperabilidad + observabilidad
 
 **Tareas**
+- Migrar Map+JSON → SQLite (cifrado); índices por dueño/fecha (movido desde S9)
 - Paginación en `/api/recordings` (limit/offset)
 - Export FHIR R4 (`Composition`/`DocumentReference`, guía HL7.FHIR.PE)
 - Logging estructurado (pino) + métricas (latencia, error rate, cola)

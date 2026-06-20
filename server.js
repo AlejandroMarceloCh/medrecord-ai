@@ -10,6 +10,7 @@ const os = require('node:os');
 const { transcribe, checkEnv } = require('./whisper');
 const llm = require('./llm');
 const enc = require('./crypto');
+const auth = require('./auth');
 
 // Para logs: nunca imprimas el id completo ni PII, solo un prefijo no identificable.
 const shortId = (id) => String(id || '').slice(0, 8);
@@ -21,6 +22,8 @@ const STATIC_DIR = PROD && fs.existsSync(distDir) ? distDir : path.join(__dirnam
 
 const DATA_DIR = process.env.MEDRECORD_DATA_DIR || path.join(__dirname, 'data', 'recordings');
 fs.mkdirSync(DATA_DIR, { recursive: true });
+auth.init(DATA_DIR);
+auth.bootstrapAdmin();
 
 // Dirección LAN (para que la web muestre el enlace al móvil en el estado vacío).
 function lanAddress() {
@@ -120,16 +123,77 @@ app.get('/health', async (_req, res) => res.json({
   ts: Date.now(),
 }));
 
-// ── Auth (opcional: solo activo si MEDRECORD_TOKEN está seteado) ──────────────
+// ── Auth: identidad + sesiones ────────────────────────────────────────────────
+// Identidad por sesión (cookie) o, legacy, por Bearer MEDRECORD_TOKEN (dispositivo
+// de grabación). La autenticación se EXIGE si hay usuarios creados o token seteado;
+// si no hay ninguno (dev), las rutas quedan abiertas para no romper el flujo local.
 const REQUIRED_TOKEN = process.env.MEDRECORD_TOKEN || '';
-if (REQUIRED_TOKEN) {
-  app.use('/api', (req, res, next) => {
-    const auth = req.headers['authorization'] || '';
-    const [scheme, provided] = auth.split(' ');
-    if (scheme === 'Bearer' && provided === REQUIRED_TOKEN) return next();
-    res.status(401).json({ error: 'no autorizado' });
-  });
+const cookieSecure = PROD;
+
+// Resuelve req.identity en cada request a /api.
+app.use('/api', (req, _res, next) => {
+  const cookies = auth.parseCookies(req);
+  const user = auth.getSessionUser(cookies[auth.COOKIE]);
+  if (user) { req.identity = { kind: 'user', id: user.id, role: user.role, name: user.name }; return next(); }
+  const hdr = req.headers['authorization'] || '';
+  const [scheme, provided] = hdr.split(' ');
+  if (REQUIRED_TOKEN && scheme === 'Bearer' && provided === REQUIRED_TOKEN) {
+    req.identity = { kind: 'device', id: 'device', role: 'device' };
+  } else {
+    req.identity = null;
+  }
+  next();
+});
+
+// Login: valida credenciales y entrega cookie de sesión. No requiere auth previa.
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body || {};
+  const u = auth.authenticate(username, password);
+  if (!u) { auth.audit({ action: 'login-fail', user: shortId(String(username || '')) }); return res.status(401).json({ error: 'credenciales inválidas' }); }
+  const token = auth.createSession(u.id);
+  res.setHeader('Set-Cookie', auth.sessionCookie(token, { secure: cookieSecure }));
+  auth.audit({ action: 'login', user: u.id });
+  res.json({ user: auth.publicUser(u) });
+});
+
+app.post('/api/logout', (req, res) => {
+  const cookies = auth.parseCookies(req);
+  auth.destroySession(cookies[auth.COOKIE]);
+  res.setHeader('Set-Cookie', auth.clearCookie());
+  res.json({ ok: true });
+});
+
+const authRequired = () => auth.countUsers() > 0 || !!REQUIRED_TOKEN;
+
+app.get('/api/whoami', (req, res) => {
+  if (req.identity && req.identity.kind === 'user') {
+    return res.json({ user: { id: req.identity.id, name: req.identity.name, role: req.identity.role }, required: authRequired() });
+  }
+  res.json({ user: null, device: req.identity?.kind === 'device', required: authRequired() });
+});
+
+// Gate: si hay usuarios o token configurado, exige identidad para el resto de /api.
+const OPEN_PATHS = new Set(['/login', '/logout', '/whoami']);
+app.use('/api', (req, res, next) => {
+  if (OPEN_PATHS.has(req.path)) return next();
+  if (!authRequired()) return next();          // dev sin usuarios → abierto
+  if (req.identity) return next();
+  res.status(401).json({ error: 'no autorizado' });
+});
+
+// Gestión de usuarios (solo admin). El primer admin se crea por env (bootstrapAdmin).
+function requireAdmin(req, res, next) {
+  if (req.identity && req.identity.role === 'admin') return next();
+  res.status(403).json({ error: 'solo admin' });
 }
+app.get('/api/users', requireAdmin, (_req, res) => res.json(auth.listUsers()));
+app.post('/api/users', requireAdmin, (req, res) => {
+  try {
+    const u = auth.createUser(req.body || {});
+    auth.audit({ action: 'user-create', user: req.identity.id, target: u.id });
+    res.json(u);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
 // ── Subida de audio desde el móvil ──
 // memoryStorage: el audio entra a RAM y se cifra antes de tocar el disco; nunca
@@ -161,11 +225,14 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
     audioFile,
     audioMime: req.file.mimetype || 'audio/webm',
     audioEnc: true,
+    ownerId: req.identity && req.identity.kind === 'user' ? req.identity.id : null,
+    version: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
   recordings.set(id, rec);
   persist(rec);
+  auth.audit({ action: 'create', user: req.identity?.id || null, rec: id });
   res.json({ id, status: rec.status });
 
   broadcast({ type: 'recording:received', recording: publicRec(rec) });
@@ -251,23 +318,33 @@ function publicRec(r) {
     sources: r.sources || null,
     fields_ia: r.fields_ia || null, confirmed: r.confirmed || null,
     error: r.error, fieldsError: r.fieldsError || null,
-    reviewed: !!r.reviewed, createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
+    reviewed: !!r.reviewed, ownerId: r.ownerId || null, version: r.version || 0,
+    createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
 }
 
+// ¿Esta identidad puede ver/operar este registro? Aislamiento por dueño.
+function canSee(identity, rec) {
+  if (!identity) return true;                                  // dev sin usuarios → abierto
+  if (identity.role === 'admin' || identity.kind === 'device') return true;
+  return rec.ownerId === identity.id;
+}
+
 // ── Lectura desde la web ──
-app.get('/api/recordings', (_req, res) => {
-  const list = [...recordings.values()].sort((a, b) => b.createdAt - a.createdAt).map(publicRec);
+app.get('/api/recordings', (req, res) => {
+  const list = [...recordings.values()]
+    .filter(r => canSee(req.identity, r))
+    .sort((a, b) => b.createdAt - a.createdAt).map(publicRec);
   res.json(list);
 });
 app.get('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'no existe' });
+  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   res.json(publicRec(r));
 });
 app.get('/api/recordings/:id/audio', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r || !r.audioFile) return res.sendStatus(404);
+  if (!r || !r.audioFile || !canSee(req.identity, r)) return res.sendStatus(404);
   const fp = path.join(DATA_DIR, r.audioFile);
   if (!r.audioEnc) return res.sendFile(fp);   // legacy en claro
   try {
@@ -284,10 +361,16 @@ app.get('/api/recordings/:id/audio', (req, res) => {
 // fuente de verdad y marcamos la consulta como revisada.
 app.put('/api/recordings/:id/fields', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'no existe' });
+  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   const fields = req.body && req.body.fields;
   const wantReview = !!(req.body && req.body.reviewed);
   const confirmed = Array.isArray(req.body && req.body.confirmed) ? req.body.confirmed : null;
+
+  // Optimistic locking: si el cliente manda version, debe coincidir con la actual.
+  // Evita que dos ediciones concurrentes se pisen (la segunda recibe 409).
+  if (typeof (req.body && req.body.version) === 'number' && req.body.version !== (r.version || 0)) {
+    return res.status(409).json({ error: 'conflicto de versión', currentVersion: r.version || 0 });
+  }
 
   // Human-in-the-loop: no se puede FIRMAR si algún campo poblado por la IA no fue
   // confirmado por el médico. Guardar borrador (sin reviewed) no exige confirmación.
@@ -306,7 +389,9 @@ app.put('/api/recordings/:id/fields', (req, res) => {
     r.patient = { name: String(req.body.patient.name || '').trim(), dni: String(req.body.patient.dni || '').trim() };
   }
   if (wantReview) { r.reviewed = true; r.reviewedAt = Date.now(); }
+  r.version = (r.version || 0) + 1;            // avanza la versión en cada escritura
   r.updatedAt = Date.now();
+  auth.audit({ action: wantReview ? 'sign' : 'edit', user: req.identity?.id || null, rec: r.id, version: r.version });
   setStatus(r, wantReview ? 'reviewed' : r.status, 'recording:updated');
   res.json(publicRec(r));
 });
@@ -314,7 +399,7 @@ app.put('/api/recordings/:id/fields', (req, res) => {
 // Reintentar todo el pipeline (re-transcribe el audio en disco).
 app.post('/api/recordings/:id/retry', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'no existe' });
+  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   if (!r.audioFile || !fs.existsSync(path.join(DATA_DIR, r.audioFile))) {
     return res.status(409).json({ error: 'no hay audio para reprocesar' });
   }
@@ -326,7 +411,7 @@ app.post('/api/recordings/:id/retry', (req, res) => {
 // Reintentar SOLO el autollenado (reusa la transcripción ya hecha, no re-transcribe).
 app.post('/api/recordings/:id/reextract', async (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'no existe' });
+  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   if (!r.transcript) return res.status(409).json({ error: 'no hay transcripción' });
   res.json({ ok: true });
   setStatus(r, 'filling', 'recording:filling');
@@ -346,10 +431,11 @@ app.post('/api/recordings/:id/reextract', async (req, res) => {
 // Descartar una grabación (Map + sidecar + audio).
 app.delete('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'no existe' });
+  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   recordings.delete(r.id);
   try { fs.rmSync(metaPath(r.id), { force: true }); } catch { /* noop */ }
   if (r.audioFile) { try { fs.rmSync(path.join(DATA_DIR, r.audioFile), { force: true }); } catch { /* noop */ } }
+  auth.audit({ action: 'delete', user: req.identity?.id || null, rec: r.id });
   broadcast({ type: 'recording:deleted', id: r.id });
   res.json({ ok: true });
 });

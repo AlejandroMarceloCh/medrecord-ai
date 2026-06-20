@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Btn, IconBtn } from './ui.jsx';
 import { Icon } from './icons.jsx';
+import { logout } from './login.jsx';
 
 export function SettingsView({ cfg, setCfg, dict, setDict }) {
   const [tab, setTab]   = useState('clinic');
@@ -8,7 +9,9 @@ export function SettingsView({ cfg, setCfg, dict, setDict }) {
   const [r, setR]       = useState('');
   const [token, setToken]   = useState('');
   const [tokenSaved, setTokenSaved] = useState(false);
+  const [sessionUser, setSessionUser] = useState(null);
   useEffect(() => { setToken(localStorage.getItem('medrecord.token') || ''); }, []);
+  useEffect(() => { fetch('/api/whoami').then(r=>r.json()).then(d=>setSessionUser(d.user||null)).catch(()=>{}); }, []);
   const saveToken = () => {
     const t = token.trim();
     if (t) localStorage.setItem('medrecord.token', t);
@@ -78,6 +81,19 @@ export function SettingsView({ cfg, setCfg, dict, setDict }) {
                 Debe coincidir con <code style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>MEDRECORD_TOKEN</code> en el servidor.
               </div>
             </div>
+
+            {sessionUser && (
+              <div style={{ marginTop:24, borderTop:'1px solid var(--border-subtle)', paddingTop:20,
+                display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
+                <div>
+                  <label style={lbl}>Sesión</label>
+                  <div style={{ fontSize:14, color:'var(--text)' }}>
+                    {sessionUser.name} <span style={{ color:'var(--faint)' }}>· {sessionUser.role}</span>
+                  </div>
+                </div>
+                <Btn variant="ghost" onClick={logout} style={{ whiteSpace:'nowrap' }}>Cerrar sesión</Btn>
+              </div>
+            )}
           </div>
         )}
 

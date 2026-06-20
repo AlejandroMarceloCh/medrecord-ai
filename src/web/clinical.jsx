@@ -209,6 +209,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
         fields: unflattenVals(vals),
         patient: { name:vals['filiacion.nombre']||(rec.patient?.name)||'', dni:vals['filiacion.documento']||(rec.patient?.dni)||'' },
         confirmed: aiIds.filter(id=>confirmed.has(id)),
+        version: rec.version || 0,   // optimistic lock: el server rechaza si cambió de fondo
         ...(markReviewed ? { reviewed:true } : {}),
       };
       const r = await apiFetch(`/api/recordings/${rec.id}/fields`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
