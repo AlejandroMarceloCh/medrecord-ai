@@ -113,6 +113,26 @@ function loadAll() {
   if (recordings.size) console.log(`  Restauradas ${recordings.size} grabaciones desde disco`);
 }
 
+// Retención de audio: tras el período configurado, borra de forma SEGURA el audio de
+// las consultas ya firmadas (la nota se conserva). 0 = desactivado (no purga nada).
+const AUDIO_RETENTION_DAYS = Number(process.env.MEDRECORD_AUDIO_RETENTION_DAYS || 0);
+function purgeExpiredAudio() {
+  if (!AUDIO_RETENTION_DAYS) return 0;
+  const cutoff = Date.now() - AUDIO_RETENTION_DAYS * 86400000;
+  let purged = 0;
+  for (const rec of recordings.values()) {
+    if (rec.audioFile && !rec.audioDeleted && rec.reviewed && (rec.reviewedAt || rec.createdAt) < cutoff) {
+      enc.secureDelete(path.join(DATA_DIR, rec.audioFile));
+      rec.audioDeleted = true; rec.audioFile = null;
+      persist(rec);
+      auth.audit({ action: 'audio-purged', rec: rec.id });
+      purged++;
+    }
+  }
+  if (purged) console.log(`  ${purged} audio(s) borrados de forma segura por retención (${AUDIO_RETENTION_DAYS}d)`);
+  return purged;
+}
+
 const app = express();
 app.disable('x-powered-by');
 app.use(compression());
@@ -233,6 +253,10 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100
 
 app.post('/api/recordings', upload.single('audio'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'falta el audio' });
+  // Consentimiento del paciente (Ley 29733 art. 13.6: escrito para datos sensibles).
+  // Sin consentimiento registrado NO se procesa la grabación.
+  const consent = req.body.consent === 'true' || req.body.consent === true;
+  if (!consent) return res.status(400).json({ error: 'falta el consentimiento del paciente' });
   const id = crypto.randomUUID();
   const audioFile = id + '.audio';
   try {
@@ -255,6 +279,7 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
     audioFile,
     audioMime: req.file.mimetype || 'audio/webm',
     audioEnc: true,
+    consent: { granted: true, at: Date.now() },   // consentimiento registrado por grabación
     ownerId: req.identity && req.identity.kind === 'user' ? req.identity.id : null,
     version: 0,
     createdAt: Date.now(),
@@ -350,9 +375,18 @@ function publicRec(r) {
     fields_ia: r.fields_ia || null, confirmed: r.confirmed || null,
     error: r.error, fieldsError: r.fieldsError || null,
     reviewed: !!r.reviewed, reviewedAt: r.reviewedAt || null,
+    signature: r.signature || null, consent: r.consent || null, audioDeleted: !!r.audioDeleted,
     ownerId: r.ownerId || null, version: r.version || 0,
     createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
+}
+
+// Contenido canónico que firma el médico. La firma sella este snapshot exacto.
+function signaturePayload(r, signedBy) {
+  return JSON.stringify({
+    id: r.id, patient: r.patient, fields: r.fields || null,
+    transcript: r.transcript || null, reviewedAt: r.reviewedAt, signedBy: signedBy || null,
+  });
 }
 
 // Fuerza los campos al esquema canónico (descarta claves fuera de esquema).
@@ -397,6 +431,17 @@ app.get('/api/recordings/:id', (req, res) => {
   if (!canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   res.json(publicRec(r));
 });
+// Verifica la firma de integridad: recomputa el HMAC del contenido y lo compara.
+app.get('/api/recordings/:id/verify', (req, res) => {
+  const r = recordings.get(req.params.id);
+  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
+  if (!r.signature) return res.json({ signed: false, valid: false });
+  const expected = enc.hmac(signaturePayload(r, r.signature.signedBy));
+  res.json({
+    signed: true, valid: expected === r.signature.hash,
+    alg: r.signature.alg, signedAt: r.signature.signedAt, signedBy: r.signature.signedBy,
+  });
+});
 app.get('/api/recordings/:id/audio', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !r.audioFile || !canSee(req.identity, r)) return res.sendStatus(404);
@@ -417,6 +462,8 @@ app.get('/api/recordings/:id/audio', (req, res) => {
 app.put('/api/recordings/:id/fields', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
+  // Una historia firmada es inmutable: no se edita más (la firma quedaría desincronizada).
+  if (r.reviewed) return res.status(409).json({ error: 'la consulta ya está firmada' });
   const fields = req.body && req.body.fields;
   const wantReview = !!(req.body && req.body.reviewed);
   const confirmed = Array.isArray(req.body && req.body.confirmed) ? req.body.confirmed : null;
@@ -443,7 +490,12 @@ app.put('/api/recordings/:id/fields', (req, res) => {
   if (req.body && req.body.patient && typeof req.body.patient === 'object') {
     r.patient = { name: String(req.body.patient.name || '').trim(), dni: String(req.body.patient.dni || '').trim() };
   }
-  if (wantReview) { r.reviewed = true; r.reviewedAt = Date.now(); }
+  if (wantReview) {
+    r.reviewed = true; r.reviewedAt = Date.now();
+    // Firma de integridad: sella el contenido firmado (tamper-evidence verificable).
+    const signedBy = req.identity?.id || null;
+    r.signature = { alg: 'HMAC-SHA256', hash: enc.hmac(signaturePayload(r, signedBy)), signedAt: r.reviewedAt, signedBy };
+  }
   r.version = (r.version || 0) + 1;            // avanza la versión en cada escritura
   r.updatedAt = Date.now();
   auth.audit({ action: wantReview ? 'sign' : 'edit', user: req.identity?.id || null, rec: r.id, version: r.version });
@@ -578,6 +630,8 @@ server.listen(PORT, HOST, () => {
   console.log(`  Whisper: ${whisperOk ? 'OK' : 'NO configurado → ' + checkEnv().join(', ')}`);
   llm.available().then(ok => console.log(`  LLM: ${ok ? 'OK (' + llm.MODEL + ', Ollama local)' : 'no disponible (campos a mano)'}`));
   loadAll();
+  purgeExpiredAudio();                                   // al arrancar
+  setInterval(purgeExpiredAudio, 60 * 60 * 1000).unref(); // y cada hora
   console.log(`  Web:    http://localhost:${PORT}/web`);
   console.log(`  Móvil:  http://localhost:${PORT}/mobile`);
   if (LAN) console.log(`  LAN:    http://${LAN}:${PORT}/mobile   ← abrir en el celular (el micrófono necesita https)`);

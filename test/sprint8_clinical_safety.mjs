@@ -37,6 +37,13 @@ writeFileSync(join(DATA, ID + '.json'), JSON.stringify({
   sources: null, error: null, fieldsError: null, reviewed: false,
   createdAt: Date.now(), updatedAt: Date.now(),
 }));
+// Registro aparte, NUNCA firmado, para probar el guardado de borrador.
+const ID_DRAFT = 's8-draft';
+writeFileSync(join(DATA, ID_DRAFT + '.json'), JSON.stringify({
+  id: ID_DRAFT, patient: { name: 'Borrador', dni: '' }, durationSec: 10, status: 'done',
+  transcript: 't', fields: baseFields(), fields_ia: baseFields(), confirmed: [],
+  reviewed: false, createdAt: Date.now(), updatedAt: Date.now(),
+}));
 
 const results = [];
 const add = (name, ok, detail) => results.push({ name, ok, detail });
@@ -96,20 +103,8 @@ try {
     iaDx === 'cefalea tensional' && finalDx === 'cefalea tensional + descartar migraña' && iaDx !== finalDx,
     `ia="${iaDx}" final="${finalDx}"`);
 
-  // ── 5. Borrador (sin reviewed) no exige confirmación ──
-  // Reusamos otro registro fresco para no chocar con el ya firmado.
-  const ID2 = 's8-draft';
-  writeFileSync(join(DATA, ID2 + '.json'), JSON.stringify({
-    id: ID2, patient: { name: 'Draft', dni: '' }, status: 'done', transcript: 't',
-    fields: baseFields(), fields_ia: baseFields(), confirmed: [], reviewed: false,
-    createdAt: Date.now(), updatedAt: Date.now(),
-  }));
-  // El server ya cargó al arrancar; este sidecar nuevo no está en RAM. Lo probamos
-  // sobre el registro original que YA está firmado no sirve. Mejor: guardamos borrador
-  // del registro original ANTES de firmarlo no es posible (ya firmado). Validamos la
-  // regla directamente: un PUT sin reviewed sobre el firmado no exige confirmación
-  // y no cambia el estado de revisado a no-revisado.
-  const r5 = await fetch(`${BASE}/api/recordings/${ID}/fields`, {
+  // ── 5. Borrador (sin reviewed) no exige confirmación — sobre un registro NO firmado ──
+  const r5 = await fetch(`${BASE}/api/recordings/${ID_DRAFT}/fields`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: edited, confirmed: [] }),   // sin reviewed
   });

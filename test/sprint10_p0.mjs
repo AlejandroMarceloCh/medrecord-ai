@@ -47,7 +47,7 @@ async function login(u, p) { const r = await jpost(`${BASE}/api/login`, { userna
 async function upload(cookie, name) {
   const fd = new FormData();
   fd.append('audio', new Blob([Buffer.from('fake')], { type: 'audio/webm' }), 'c.webm');
-  fd.append('patientName', name); fd.append('durationSec', '5');
+  fd.append('patientName', name); fd.append('durationSec', '5'); fd.append('consent', 'true');
   const r = await fetch(`${BASE}/api/recordings`, { method: 'POST', headers: { Cookie: cookie }, body: fd });
   return (await r.json()).id;
 }

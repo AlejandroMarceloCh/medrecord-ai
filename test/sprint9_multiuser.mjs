@@ -51,6 +51,7 @@ async function upload(cookie) {
   const fd = new FormData();
   fd.append('audio', new Blob([Buffer.from('fake-audio-bytes')], { type: 'audio/webm' }), 'c.webm');
   fd.append('durationSec', '5');
+  fd.append('consent', 'true');
   const r = await fetch(`${BASE}/api/recordings`, { method: 'POST', headers: { Cookie: cookie }, body: fd });
   return (await r.json()).id;
 }

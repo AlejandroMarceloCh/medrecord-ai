@@ -65,6 +65,7 @@ try {
   fd.append('patientName', NAME);
   fd.append('patientDni', DNI);
   fd.append('durationSec', '12');
+  fd.append('consent', 'true');
   const up = await fetch(`${BASE}/api/recordings`, { method: 'POST', body: fd });
   const { id } = await up.json();
 

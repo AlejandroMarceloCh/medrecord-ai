@@ -171,7 +171,7 @@ resume serializado; login throttle → 429; `available()` con match estricto. + 
 
 ---
 
-## Sprint 14 — Cumplimiento legal Perú (antes Sprint 10)
+## Sprint 14 — Cumplimiento legal Perú (antes Sprint 10) ✅
 
 **Tareas**
 - Firma digital de la nota (RENIECE; puente: firma criptográfica + hash sellado,

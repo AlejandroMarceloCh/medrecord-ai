@@ -76,4 +76,27 @@ function isEncrypted(srcPath) {
   catch { return false; }
 }
 
-module.exports = { encryptBuffer, decryptBuffer, writeEncrypted, readEncrypted, isEncrypted, keyPath };
+// Firma de integridad (HMAC-SHA256 con la clave maestra). Es un PUENTE de
+// tamper-evidence verificable, NO una firma digital RENIECE legalmente vinculante
+// (eso requiere certificados de RENIECE, fuera del alcance del código).
+function hmac(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  return crypto.createHmac('sha256', KEY).update(buf).digest('hex');
+}
+
+// Borrado seguro: sobrescribe el archivo con bytes aleatorios (+fsync) antes de
+// eliminarlo, para que el contenido no quede recuperable del disco.
+function secureDelete(filePath) {
+  try {
+    const sz = fs.statSync(filePath).size;
+    if (sz > 0) {
+      const fd = fs.openSync(filePath, 'r+');
+      try { fs.writeSync(fd, crypto.randomBytes(sz), 0, sz, 0); fs.fsyncSync(fd); }
+      finally { fs.closeSync(fd); }
+    }
+    fs.unlinkSync(filePath);
+    return true;
+  } catch { try { fs.unlinkSync(filePath); } catch { /* noop */ } return false; }
+}
+
+module.exports = { encryptBuffer, decryptBuffer, writeEncrypted, readEncrypted, isEncrypted, keyPath, hmac, secureDelete };

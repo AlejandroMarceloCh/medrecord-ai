@@ -86,6 +86,11 @@ function LoginScreen({ onDone, expired }) {
           style={{ width: '100%', justifyContent: 'center' }}>
           {busy ? 'Entrando…' : 'Entrar'}
         </Btn>
+
+        <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 18, lineHeight: 1.5 }}>
+          Herramienta de asistencia. El profesional que firma es responsable del contenido
+          de la historia clínica. Los datos se procesan localmente.
+        </div>
       </form>
     </div>
   );
