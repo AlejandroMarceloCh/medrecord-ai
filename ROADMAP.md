@@ -90,7 +90,88 @@ todo, acceso cruzado 404, segundo PUT con versión vieja 409, audit con userId c
 
 ---
 
-## Sprint 10 — Cumplimiento legal Perú
+# Hardening post-auditoría (sabuesos Opus, 2026-06)
+
+19 hallazgos confirmados que valen para el piloto (ver `AUDIT_SABUESOS.md`).
+Regla de cierre de CADA sprint: test de regresión propio + **toda la suite verde**
+(`npm test`), no solo el test del sprint.
+
+## Sprint 10 — Cerrar los P0 (la PII no sale, backups recuperables)
+
+**Tareas**
+- WS-PII (P0): autenticar el upgrade del WebSocket (cookie → sesión; close 1008 si
+  no hay identidad) y emitir broadcast dirigido por `canSee`, o empujar solo
+  `{id,status}` por el canal. Hoy difunde PII completa a cualquiera en la LAN.
+- BACKUP-KEY (P0): incluir `.master.key` en el backup (o destino aparte) + README de
+  restore + nota en DEPLOY.md. Hoy el backup cifrado es irrecuperable.
+- DEVICE-READ (P1): el token Bearer de subida (móvil) = solo escritura; no debe leer
+  historias ajenas (ajustar `canSee` y los GET).
+
+**Goal:** ningún cliente sin sesión recibe PII por ningún canal (HTTP ni WS); un
+backup restaurado en una máquina limpia es legible; el token de subida no lee nada.
+
+**Test** `sprint10_p0.mjs`: cliente WS sin sesión no recibe PII; WS de A no recibe la
+de B; device token → GET 404/403; backup + restore en dir limpio descifra. + suite.
+
+## Sprint 11 — Integridad clínica (registro firmado inmutable y canónico)
+
+**Tareas**
+- RETRY-SIGNED (P2): `retry` y `reextract` sobre un registro `reviewed` → 409; avanzar
+  `version`. Hoy destruyen una historia ya firmada.
+- FIELDS-SCHEMA (P2): normalizar `fields` contra el esquema antes de guardar (descartar
+  claves basura). Hoy `r.fields = fields` guarda cualquier objeto.
+- PRINT-ATTEST (P2): el documento impreso declara asistencia por IA y atestación de
+  firma (`reviewedAt`) cuando está `reviewed`.
+
+**Goal:** una historia firmada no se puede destruir ni ensuciar con claves fuera de
+esquema; el PDF declara IA + firma.
+
+**Test** `sprint11_integridad.mjs`: retry/reextract sobre firmado → 409; PUT con claves
+basura → se descartan; el registro firmado conserva esquema canónico. + suite.
+
+## Sprint 12 — Confianza UX en el flujo de firma
+
+**Tareas**
+- SESSION-401 (P1): `apiFetch` detecta 401 → vuelve a login con copy "Tu sesión
+  expiró". Hoy es 401 silencioso con bucle "Reintentar".
+- SAVE-LOSS (P1): bloquear/avisar navegación (J/K/Siguiente) si hay cambios sin guardar
+  o `save==='error'`; mostrar el fallo como toast.
+- REEXTRACT-HANG (P2): el catch maneja `!r.ok` y apaga el spinner (hoy se cuelga).
+- LOAD-ERROR (P3): estado `loadError` → no mostrar "Todo al día" falso si la 1ª carga
+  falló.
+
+**Goal:** el médico nunca pierde trabajo en silencio ni ve estados falsos; una sesión
+caída lo regresa a login con mensaje claro.
+
+**Test** `sprint12_ux.mjs`: contrato 401 de `apiFetch` (señal de re-login); ruta de
+error de reextract; estado de error de carga. + suite.
+
+## Sprint 13 — Robustez operativa + costo del pipeline
+
+**Tareas**
+- WRITE-FSYNC (P2): `fsync` antes del `rename` en `crypto.writeEncrypted`.
+- CORRUPT-SILENT (P2): sidecar corrupto → renombrar a `<id>.json.corrupt` + log al
+  arranque "N grabaciones corruptas omitidas".
+- RESUME-STORM (P2): serializar el re-disparo de `loadAll` (for await / cap 1-2).
+- LOGIN-DOS (P2): throttle de login (Map fails/lockUntil → 429 tras N fallos).
+- AVAIL-GATE (P3): quitar el gate `available()` y ir directo a `extractFields` en
+  try/catch (como ya hace `/reextract`).
+- LLM-AVAIL (P2): match estricto del modelo en `available()` (no `startsWith`).
+- OLLAMA-KEEPALIVE (P3): `keep_alive:'30m'` en el body de Ollama.
+- WHISPER-TURBO (P2): `large-v3-turbo` como default (env override a v3); requiere tu
+  benchmark con 2-3 audios reales antes de fijarlo.
+- AUDIO-CLEAR (P3): borrar los 2 `.ogg` en claro huérfanos de `data/recordings/`.
+
+**Goal:** el sistema sobrevive cortes, corrupción y reinicios sin tormenta ni pérdida;
+el login no es DoS-able; el pipeline LLM/Whisper es más barato/rápido sin dejar de ser
+local.
+
+**Test** `sprint13_robustez.mjs`: escritura con fsync; sidecar corrupto en cuarentena;
+resume serializado; login throttle → 429; `available()` con match estricto. + suite.
+
+---
+
+## Sprint 14 — Cumplimiento legal Perú (antes Sprint 10)
 
 **Tareas**
 - Firma digital de la nota (RENIECE; puente: firma criptográfica + hash sellado,
@@ -108,7 +189,7 @@ irrecuperable.
 
 ---
 
-## Sprint 11 — Escala + interoperabilidad + observabilidad
+## Sprint 15 — Escala + interoperabilidad + observabilidad (antes Sprint 11)
 
 **Tareas**
 - Migrar Map+JSON → SQLite (cifrado); índices por dueño/fecha (movido desde S9)

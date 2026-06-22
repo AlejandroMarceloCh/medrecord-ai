@@ -313,7 +313,10 @@ function MRecorder() {
   const ensureWs = useCallback(() => {
     if (wsRef.current && (wsRef.current.readyState === 0 || wsRef.current.readyState === 1)) return;
     let ws;
-    try { ws = new WebSocket((location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host); } catch { return; }
+    // El token va por query: el navegador no permite headers en el handshake WS.
+    const tk = localStorage.getItem('medrecord.token');
+    const wsUrl = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + (tk ? '?token=' + encodeURIComponent(tk) : '');
+    try { ws = new WebSocket(wsUrl); } catch { return; }
     wsRef.current = ws;
     ws.onopen = () => {
       wsBackoff.current = 1000;

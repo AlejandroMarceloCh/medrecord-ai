@@ -235,7 +235,7 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
   auth.audit({ action: 'create', user: req.identity?.id || null, rec: id });
   res.json({ id, status: rec.status });
 
-  broadcast({ type: 'recording:received', recording: publicRec(rec) });
+  broadcastRec('recording:received', rec);
   processRecording(rec).catch((e) => { console.error('proc error', shortId(id), e.message); });
 });
 
@@ -248,7 +248,7 @@ function setStatus(rec, status, evt) {
   rec.status = status;
   rec.updatedAt = Date.now();
   persist(rec);
-  broadcast({ type: evt || ('recording:' + status), recording: publicRec(rec) });
+  broadcastRec(evt || ('recording:' + status), rec);
 }
 
 // Corre Whisper, luego (si hay LLM local) autollena campos. Dispara eventos a la web.
@@ -323,10 +323,12 @@ function publicRec(r) {
   };
 }
 
-// ¿Esta identidad puede ver/operar este registro? Aislamiento por dueño.
+// ¿Esta identidad puede LEER este registro? Aislamiento por dueño.
+// El device (token de subida del móvil) es SOLO ESCRITURA: no lee historias.
 function canSee(identity, rec) {
-  if (!identity) return true;                                  // dev sin usuarios → abierto
-  if (identity.role === 'admin' || identity.kind === 'device') return true;
+  if (!identity) return true;                 // dev sin usuarios → abierto
+  if (identity.kind === 'device') return false;
+  if (identity.role === 'admin') return true;
   return rec.ownerId === identity.id;
 }
 
@@ -339,7 +341,12 @@ app.get('/api/recordings', (req, res) => {
 });
 app.get('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
+  if (!r) return res.status(404).json({ error: 'no existe' });
+  // El device (móvil) puede consultar SOLO el estado de lo que sube, sin PII.
+  if (req.identity && req.identity.kind === 'device') {
+    return res.json({ id: r.id, status: r.status, error: r.error || null });
+  }
+  if (!canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   res.json(publicRec(r));
 });
 app.get('/api/recordings/:id/audio', (req, res) => {
@@ -436,7 +443,7 @@ app.delete('/api/recordings/:id', (req, res) => {
   try { fs.rmSync(metaPath(r.id), { force: true }); } catch { /* noop */ }
   if (r.audioFile) { try { fs.rmSync(path.join(DATA_DIR, r.audioFile), { force: true }); } catch { /* noop */ } }
   auth.audit({ action: 'delete', user: req.identity?.id || null, rec: r.id });
-  broadcast({ type: 'recording:deleted', id: r.id });
+  broadcastRaw({ type: 'recording:deleted', id: r.id });   // solo id, sin PII
   res.json({ ok: true });
 });
 
@@ -460,12 +467,42 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server });
 const clients = new Set();
 
-function broadcast(data) {
+// Identidad del WS desde el handshake: cookie de sesión (web) o ?token= (móvil).
+// El navegador no puede mandar headers en el WS, por eso el móvil usa query param.
+function wsIdentity(req) {
+  const cookies = auth.parseCookies(req);
+  const user = auth.getSessionUser(cookies[auth.COOKIE]);
+  if (user) return { kind: 'user', id: user.id, role: user.role };
+  try {
+    const token = new URL(req.url, 'http://localhost').searchParams.get('token');
+    if (REQUIRED_TOKEN && token === REQUIRED_TOKEN) return { kind: 'device', id: 'device', role: 'device' };
+  } catch { /* noop */ }
+  return null;
+}
+
+// Broadcast de eventos de grabación: a cada cliente según su visibilidad.
+// device → solo estado (sin PII); usuario que puede ver → publicRec completo; resto → nada.
+function broadcastRec(type, rec) {
+  for (const ws of clients) {
+    if (ws.readyState !== 1) continue;
+    if (ws.identity && ws.identity.kind === 'device') {
+      ws.send(JSON.stringify({ type, recording: { id: rec.id, status: rec.status, error: rec.error || null, updatedAt: rec.updatedAt || rec.createdAt } }));
+    } else if (canSee(ws.identity, rec)) {
+      ws.send(JSON.stringify({ type, recording: publicRec(rec) }));
+    }
+  }
+}
+
+// Mensajes sin PII (solo id): se pueden mandar a todos los clientes conectados.
+function broadcastRaw(data) {
   const msg = JSON.stringify(data);
   for (const ws of clients) if (ws.readyState === 1) ws.send(msg);
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  ws.identity = wsIdentity(req);
+  // Si la auth está activa y el handshake no trae identidad → cerrar (1008 policy).
+  if (authRequired() && !ws.identity) { try { ws.close(1008, 'no autorizado'); } catch { /* noop */ } return; }
   clients.add(ws);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
