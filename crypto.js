@@ -49,11 +49,19 @@ function decryptBuffer(blob) {
   return Buffer.concat([decipher.update(data), decipher.final()]);
 }
 
-// Escritura atómica cifrada (temp + rename): un corte de luz no corrompe el destino.
+// Escritura atómica cifrada: write → fsync → rename. El fsync fuerza el flush a
+// disco antes del rename, así un corte de luz no deja el destino truncado.
 function writeEncrypted(destPath, data) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
   const tmp = destPath + '.tmp';
-  fs.writeFileSync(tmp, encryptBuffer(buf));
+  const payload = encryptBuffer(buf);
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeSync(fd, payload);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, destPath);
 }
 

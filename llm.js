@@ -49,8 +49,11 @@ async function available() {
     const r = await fetch(OLLAMA + '/api/tags', { signal: AbortSignal.timeout(2000) });
     if (!r.ok) return false;
     const d = await r.json();
-    const base = MODEL.split(':')[0];
-    return (d.models || []).some(m => m.name === MODEL || m.name.startsWith(base));
+    // Match estricto: el modelo configurado debe estar de verdad. El startsWith laxo
+    // daba falsos positivos ("LLM OK" con un qwen2.5 distinto) y el autollenado fallaba.
+    const hasTag = MODEL.indexOf(':') !== -1;
+    return (d.models || []).some(m =>
+      m.name === MODEL || m.name === MODEL + ':latest' || (!hasTag && m.name.startsWith(MODEL + ':')));
   } catch { return false; }
 }
 
@@ -125,6 +128,9 @@ async function extractFields(transcript, { patient, date } = {}) {
     model: MODEL,
     stream: false,
     format: 'json',
+    // keep_alive: mantén el modelo cargado entre pacientes (evita recarga en frío
+    // de ~5 s cada autollenado). No '-1' porque la Mac es de uso dual.
+    keep_alive: process.env.OLLAMA_KEEP_ALIVE || '30m',
     options: { temperature: 0.1, num_ctx: 8192 },
     messages: [
       { role: 'system', content: SYSTEM },

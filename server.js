@@ -71,6 +71,7 @@ async function withAudioFile(rec, fn) {
 function loadAll() {
   let files = [];
   try { files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json')); } catch { /* noop */ }
+  let corrupt = 0;
   for (const f of files) {
     const fp = path.join(DATA_DIR, f);
     try {
@@ -82,14 +83,22 @@ function loadAll() {
         recordings.set(rec.id, rec);
         if (!wasEncrypted) { try { enc.writeEncrypted(fp, JSON.stringify(rec)); } catch { /* noop */ } } // migra a cifrado
       }
-    } catch { console.error('Sidecar corrupto (omitido):', shortId(f)); }  // sin err.message: puede traer contenido
+    } catch {
+      // No se pudo descifrar ni parsear: ponlo en cuarentena en vez de perderlo en silencio.
+      corrupt++;
+      try { fs.renameSync(fp, fp + '.corrupt'); } catch { /* noop */ }
+      console.error('Sidecar corrupto movido a .corrupt:', shortId(f));  // sin contenido
+    }
   }
-  // Reanudar las que quedaron en un estado intermedio.
+
+  // Reanudar las que quedaron a medias, SERIALIZADO: re-disparar todas a la vez tras
+  // un crash satura Whisper/Ollama. El resto del pipeline asume "una a la vez".
+  const toResume = [];
   for (const rec of recordings.values()) {
     if (rec.status === 'received' || rec.status === 'processing' || rec.status === 'filling') {
       if (rec.audioFile && fs.existsSync(path.join(DATA_DIR, rec.audioFile))) {
         rec.status = 'received';
-        processRecording(rec).catch(() => {});
+        toResume.push(rec);
       } else {
         rec.status = 'error';
         rec.error = 'Se perdió el audio al reiniciar el servidor.';
@@ -97,6 +106,10 @@ function loadAll() {
       }
     }
   }
+  if (toResume.length) {
+    (async () => { for (const rec of toResume) { try { await processRecording(rec); } catch { /* noop */ } } })();
+  }
+  if (corrupt) console.log(`  ${corrupt} grabación(es) corrupta(s) puestas en cuarentena (.corrupt)`);
   if (recordings.size) console.log(`  Restauradas ${recordings.size} grabaciones desde disco`);
 }
 
@@ -145,11 +158,28 @@ app.use('/api', (req, _res, next) => {
   next();
 });
 
+// Throttle de login: limita intentos fallidos por usuario. Cada intento gasta CPU
+// (scrypt), así que sin freno es un mini-DoS. Tras MAX_FAILS, bloquea LOCK_MS.
+const loginFails = new Map();   // username → { fails, lockUntil }
+const LOGIN_MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS || 5);
+const LOGIN_LOCK_MS = Number(process.env.LOGIN_LOCK_MS || 60000);
+
 // Login: valida credenciales y entrega cookie de sesión. No requiere auth previa.
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
+  const key = String(username || '').trim().toLowerCase();
+  const fr = loginFails.get(key);
+  if (fr && fr.lockUntil > Date.now()) {
+    return res.status(429).json({ error: 'demasiados intentos, espera un momento' });
+  }
   const u = auth.authenticate(username, password);
-  if (!u) { auth.audit({ action: 'login-fail', user: shortId(String(username || '')) }); return res.status(401).json({ error: 'credenciales inválidas' }); }
+  if (!u) {
+    const fails = (fr && fr.fails || 0) + 1;
+    loginFails.set(key, { fails, lockUntil: fails >= LOGIN_MAX_FAILS ? Date.now() + LOGIN_LOCK_MS : 0 });
+    auth.audit({ action: 'login-fail', user: shortId(key) });
+    return res.status(401).json({ error: 'credenciales inválidas' });
+  }
+  loginFails.delete(key);   // reset al autenticar bien
   const token = auth.createSession(u.id);
   res.setHeader('Set-Cookie', auth.sessionCookie(token, { secure: cookieSecure }));
   auth.audit({ action: 'login', user: u.id });
@@ -271,11 +301,12 @@ async function processRecording(rec) {
     return;
   }
 
-  // Fase 1: transcripción lista (la web ya puede mostrarla)
-  const llmOk = await llm.available();
+  // Fase 1: transcripción lista (la web ya puede mostrarla).
+  // Sin gate available() (un probe lento daba 'done' falso sin campos ni ruta de
+  // reintento). Intentamos el autollenado directo; si el LLM no está, falla rápido
+  // (conexión rechazada) y queda fieldsError con su botón de Reintentar en la UI.
   rec.fieldsError = null;
-  setStatus(rec, llmOk ? 'filling' : 'done', 'recording:transcribed');
-  if (!llmOk) return;
+  setStatus(rec, 'filling', 'recording:transcribed');
 
   // Fase 2: autollenado de campos con el LLM local
   try {

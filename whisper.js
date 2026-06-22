@@ -12,7 +12,15 @@ const WHISPER_HOME = process.env.WHISPER_HOME
   || path.join(HOME, 'Desktop/PROYECTOS_2026/Transcripciones/whisper.cpp');
 
 const BIN   = process.env.WHISPER_BIN   || path.join(WHISPER_HOME, 'build/bin/whisper-cli');
-const MODEL = process.env.WHISPER_MODEL || path.join(WHISPER_HOME, 'models/ggml-large-v3.bin');
+// Modelo: turbo es ~3-4x más rápido que large-v3 con calidad similar. Lo usamos por
+// defecto SI el archivo existe (no rompe instalaciones que solo tienen v3). Para fijarlo
+// o forzar v3, usa WHISPER_MODEL. Conviene benchmarkear 2-3 audios reales en español.
+function defaultModel() {
+  const turbo = path.join(WHISPER_HOME, 'models/ggml-large-v3-turbo.bin');
+  const v3    = path.join(WHISPER_HOME, 'models/ggml-large-v3.bin');
+  return fs.existsSync(turbo) ? turbo : v3;
+}
+const MODEL = process.env.WHISPER_MODEL || defaultModel();
 const VAD   = process.env.WHISPER_VAD   || path.join(WHISPER_HOME, 'models/ggml-silero-v5.1.2-v6.2.1-ggml.bin');
 const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const LANG = process.env.WHISPER_LANG || 'es';
