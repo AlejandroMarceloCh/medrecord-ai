@@ -211,6 +211,8 @@ export function WebRoot() {
   const [listSort,    setListSort]    = useState('newest');
   const [hovFieldId,  setHovFieldId]  = useState(null);
   const [includePast, setIncludePast] = useState(false);
+  const [loadError,   setLoadError]   = useState(false);
+  const dirtyRef = useRef(false);   // ¿hay edits sin guardar en el visor? (lo reporta ClinicalFields)
 
   const upsert    = rec => setRecs(list => { const i=list.findIndex(r=>r.id===rec.id); if(i===-1)return[rec,...list]; const c=[...list]; c[i]=rec; return c; });
   const removeRec = id  => setRecs(list => list.filter(r=>r.id!==id));
@@ -229,8 +231,12 @@ export function WebRoot() {
 
   const refetch = useRef(() => {});
   refetch.current = async () => {
-    try { const d=await (await apiFetch('/api/recordings')).json(); setRecs(d); setLoading(false); }
-    catch { setLoading(false); }
+    try {
+      const res = await apiFetch('/api/recordings');
+      if (!res.ok) throw new Error('http ' + res.status);   // 401 ya lo maneja LoginGate
+      const d = await res.json();
+      setRecs(d); setLoadError(false); setLoading(false);
+    } catch { setLoadError(true); setLoading(false); }
   };
 
   // WebSocket
@@ -291,6 +297,7 @@ export function WebRoot() {
   };
 
   const handleSelect = id => {
+    if (id !== selectedId && !confirmLeave()) return;
     setSelectedId(id);
     setView('workbench');
   };
@@ -321,11 +328,16 @@ export function WebRoot() {
     }
   };
 
+  // No cambiar de paciente con edits sin guardar sin avisar (se perderían en silencio).
+  const confirmLeave = () => !dirtyRef.current ||
+    window.confirm('Tienes cambios sin guardar en esta consulta. ¿Continuar sin guardar?');
   const onPrev = () => {
+    if (!confirmLeave()) return;
     const idx = activeQueue.findIndex(r=>r.id===selectedId);
     if (idx > 0) setSelectedId(activeQueue[idx-1].id);
   };
   const onNext = () => {
+    if (!confirmLeave()) return;
     const idx = activeQueue.findIndex(r=>r.id===selectedId);
     if (idx < activeQueue.length-1) setSelectedId(activeQueue[idx+1].id);
   };
@@ -343,7 +355,7 @@ export function WebRoot() {
     return () => window.removeEventListener('keydown', onKey);
   }, [view, activeQueue, selectedId]);
 
-  const onBack = () => { setActiveTab('reviewed'); setSelectedId(null); setView('listing'); };
+  const onBack = () => { if (!confirmLeave()) return; setActiveTab('reviewed'); setSelectedId(null); setView('listing'); };
 
   useEffect(() => { setHovFieldId(null); }, [selectedId]);
 
@@ -371,9 +383,17 @@ export function WebRoot() {
               rec={liveRec} cfg={cfg} dict={dict} onHoverField={setHovFieldId}
               onSaved={upsert} onDelete={handleDelete} onRetry={handleRetry}
               onSign={onSign} onPrev={onPrev} onNext={onNext}
+              onDirty={(d)=>{ dirtyRef.current = d; }}
               queuePos={queuePos} pendingCount={activeQueue.length}/>
             <TranscriptPanel rec={liveRec} dict={dict} hovFieldId={hovFieldId}/>
           </div>
+        </div>
+
+      ) : view==='workbench' && loadError && recs.length===0 ? (
+        <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, color:'var(--muted)' }}>
+          <div style={{ fontSize:15, fontWeight:650 }}>No se pudieron cargar las consultas</div>
+          <div style={{ fontSize:13, color:'var(--faint)' }}>Revisa la conexión con el servidor.</div>
+          <Btn onClick={()=>{ setLoadError(false); refetch.current(); }}>Reintentar</Btn>
         </div>
 
       ) : view==='workbench' ? (

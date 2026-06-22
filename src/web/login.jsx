@@ -7,6 +7,7 @@ import { Btn } from './ui.jsx';
 // - Si la auth está activada y no hay sesión → formulario de login.
 export function LoginGate({ children }) {
   const [state, setState] = useState('checking'); // checking | login | ready
+  const [expired, setExpired] = useState(false);
   const check = async () => {
     try {
       const d = await (await fetch('/api/whoami')).json();
@@ -16,12 +17,19 @@ export function LoginGate({ children }) {
   };
   useEffect(() => { check(); }, []);
 
+  // Si una llamada devuelve 401 (sesión caduca / server reiniciado) → volver a login.
+  useEffect(() => {
+    const onUnauth = () => { setExpired(true); setState('login'); };
+    window.addEventListener('medrecord:unauthorized', onUnauth);
+    return () => window.removeEventListener('medrecord:unauthorized', onUnauth);
+  }, []);
+
   if (state === 'checking') return null;
-  if (state === 'login') return <LoginScreen onDone={() => setState('ready')} />;
+  if (state === 'login') return <LoginScreen expired={expired} onDone={() => { setExpired(false); setState('ready'); }} />;
   return children;
 }
 
-function LoginScreen({ onDone }) {
+function LoginScreen({ onDone, expired }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
@@ -54,7 +62,9 @@ function LoginScreen({ onDone }) {
         background: 'var(--surface)', border: '1px solid var(--border-subtle)', borderRadius: 14,
         padding: '32px 28px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
         <div style={{ fontSize: 21, fontWeight: 800, letterSpacing: '-0.02em', marginBottom: 4 }}>MedRecord</div>
-        <div style={{ fontSize: 13.5, color: 'var(--faint)', marginBottom: 24 }}>Inicia sesión para continuar</div>
+        <div style={{ fontSize: 13.5, color: 'var(--faint)', marginBottom: 24 }}>
+          {expired ? 'Tu sesión expiró. Vuelve a iniciar sesión.' : 'Inicia sesión para continuar'}
+        </div>
 
         <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase',
           color: 'var(--faint)', display: 'block', marginBottom: 6 }}>Usuario</label>

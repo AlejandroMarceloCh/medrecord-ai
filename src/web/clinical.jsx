@@ -156,7 +156,7 @@ export function PrintDoc({ rec, vals, cfg, dict }) {
 }
 
 // ── ClinicalFields (Column B) ─────────────────────────────────────────────────
-export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete, onRetry, onReextract, onSign, onPrev, onNext, queuePos, pendingCount }) {
+export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete, onRetry, onReextract, onSign, onPrev, onNext, onDirty, queuePos, pendingCount }) {
   const sources = rec?.sources || {};
   // Aplica el diccionario médico al aplanar los campos (queda corregido al firmar).
   const flat = (f) => { const o = flattenFields(f); for (const k in o) o[k] = applyDict(o[k], dict); return o; };
@@ -199,6 +199,10 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
     if (reextracting && (rec?.status==='done'||rec?.status==='reviewed')) setReextracting(false);
   }, [rec?.status, rec?.fields]);
 
+  // Reporta al padre si hay trabajo sin guardar (para avisar antes de cambiar de paciente).
+  useEffect(() => { onDirty?.(dirty || save==='error'); }, [dirty, save]);
+  useEffect(() => () => onDirty?.(false), []);   // al desmontar, ya no hay nada sin guardar aquí
+
   // Editar un campo de IA cuenta como confirmarlo (el médico lo está atendiendo).
   const setField = (id, v) => {
     touched.current[id]=true; setVals(s=>({...s,[id]:v})); setDirty(true); setSave('idle');
@@ -236,7 +240,10 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
 
   const doReextract = async () => {
     setReextracting(true);
-    try { await apiFetch(`/api/recordings/${rec.id}/reextract`, { method:'POST' }); } catch {}
+    try {
+      const r = await apiFetch(`/api/recordings/${rec.id}/reextract`, { method:'POST' });
+      if (!r.ok) setReextracting(false);   // 404/409 (p. ej. ya firmada): no dejar el spinner colgado
+    } catch { setReextracting(false); }
   };
 
   const isReviewed = rec?.status === 'reviewed' || rec?.reviewed;
@@ -341,6 +348,9 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
 
         <div style={{ flex:1 }}/>
 
+        {save==='error' && (
+          <span style={{ fontSize:12.5, color:'var(--danger)', fontWeight:600 }}>No se pudo guardar</span>
+        )}
         {!isError && !isProc && (<>
           {dirty && (
             <Btn variant={saveVariant} size="sm" onClick={()=>doSave(false)} disabled={save==='saving'}>{saveLabel}</Btn>

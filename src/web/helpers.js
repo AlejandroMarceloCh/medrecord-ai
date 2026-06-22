@@ -108,13 +108,23 @@ export function unflattenVals(vals) {
   return out;
 }
 
-// fetch wrapper que añade Authorization cuando hay token configurado
+// fetch wrapper: añade Authorization si hay token, y avisa cuando la sesión caduca.
+// Un 401 (sesión expirada o server reiniciado) dispara un evento que devuelve a login,
+// en vez de fallar en silencio y dejar al médico en un bucle de "Reintentar".
 export function apiFetch(url, opts = {}) {
+  let finalOpts = opts;
   const token = typeof localStorage !== 'undefined' && localStorage.getItem('medrecord.token');
-  if (!token) return fetch(url, opts);
-  const headers = new Headers(opts.headers || {});
-  headers.set('Authorization', 'Bearer ' + token);
-  return fetch(url, { ...opts, headers });
+  if (token) {
+    const headers = new Headers(opts.headers || {});
+    headers.set('Authorization', 'Bearer ' + token);
+    finalOpts = { ...opts, headers };
+  }
+  return fetch(url, finalOpts).then(res => {
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('medrecord:unauthorized'));
+    }
+    return res;
+  });
 }
 
 // Deterministic avatar color — warm palette, no purple, no Claude defaults
