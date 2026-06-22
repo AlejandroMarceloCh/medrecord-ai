@@ -144,6 +144,13 @@ export function PrintDoc({ rec, vals, cfg, dict }) {
         <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',color:'#666',borderTop:'1px solid #ddd',paddingTop:8}}>Anexo · Transcripción</div>
         <div style={{fontSize:10.5,color:'#444',whiteSpace:'pre-wrap',marginTop:4}}>{applyDict(rec.transcript, dict)}</div>
       </div>}
+      {/* Atestación: el documento declara asistencia por IA y la firma del médico. */}
+      <div style={{marginTop:18,paddingTop:8,borderTop:'1px solid #bbb',fontSize:10,color:'#555',breakInside:'avoid'}}>
+        <div>Documento generado con asistencia de IA y revisado por el profesional.</div>
+        {rec.reviewed
+          ? <div style={{marginTop:2}}><strong>Revisado y firmado</strong>{cfg.doctorName?` por ${cfg.doctorName}`:''}{rec.reviewedAt?` · ${fmtDateTime(rec.reviewedAt)}`:''}.</div>
+          : <div style={{marginTop:2,color:'#a00'}}><strong>BORRADOR sin firmar</strong> — no válido como historia clínica.</div>}
+      </div>
     </div>
   );
 }

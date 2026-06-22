@@ -318,9 +318,26 @@ function publicRec(r) {
     sources: r.sources || null,
     fields_ia: r.fields_ia || null, confirmed: r.confirmed || null,
     error: r.error, fieldsError: r.fieldsError || null,
-    reviewed: !!r.reviewed, ownerId: r.ownerId || null, version: r.version || 0,
+    reviewed: !!r.reviewed, reviewedAt: r.reviewedAt || null,
+    ownerId: r.ownerId || null, version: r.version || 0,
     createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
+}
+
+// Fuerza los campos al esquema canónico (descarta claves fuera de esquema).
+// Garantiza que una historia firmada no quede con claves basura inyectadas.
+function coerceFields(fields) {
+  const base = llm.emptyFields();
+  const out = llm.emptyFields();
+  if (!fields || typeof fields !== 'object') return out;
+  for (const sec of Object.keys(base)) {
+    const src = fields[sec] || {};
+    for (const k of Object.keys(base[sec])) {
+      const v = src[k];
+      out[sec][k] = (v == null) ? '' : String(v).trim();
+    }
+  }
+  return out;
 }
 
 // ¿Esta identidad puede LEER este registro? Aislamiento por dueño.
@@ -390,7 +407,7 @@ app.put('/api/recordings/:id/fields', (req, res) => {
     }
   }
 
-  if (fields && typeof fields === 'object') r.fields = fields;
+  if (fields && typeof fields === 'object') r.fields = coerceFields(fields);
   if (confirmed) r.confirmed = confirmed;   // qué confirmó el médico (trazabilidad)
   if (req.body && req.body.patient && typeof req.body.patient === 'object') {
     r.patient = { name: String(req.body.patient.name || '').trim(), dni: String(req.body.patient.dni || '').trim() };
@@ -407,6 +424,8 @@ app.put('/api/recordings/:id/fields', (req, res) => {
 app.post('/api/recordings/:id/retry', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
+  // Una historia ya firmada es inmutable: no se puede reprocesar (destruiría la firma).
+  if (r.reviewed) return res.status(409).json({ error: 'la consulta ya está firmada' });
   if (!r.audioFile || !fs.existsSync(path.join(DATA_DIR, r.audioFile))) {
     return res.status(409).json({ error: 'no hay audio para reprocesar' });
   }
@@ -419,6 +438,7 @@ app.post('/api/recordings/:id/retry', (req, res) => {
 app.post('/api/recordings/:id/reextract', async (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
+  if (r.reviewed) return res.status(409).json({ error: 'la consulta ya está firmada' });
   if (!r.transcript) return res.status(409).json({ error: 'no hay transcripción' });
   res.json({ ok: true });
   setStatus(r, 'filling', 'recording:filling');
