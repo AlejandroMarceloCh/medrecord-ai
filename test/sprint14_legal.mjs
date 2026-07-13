@@ -42,7 +42,7 @@ async function upload(base, name, withConsent) {
 // ── Server A: consentimiento + firma + verificación ──
 const wA = mkdtempSync(join(tmpdir(), 'medrec-s14a-'));
 const srvA = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: '3410', NODE_ENV: 'development', MEDRECORD_DATA_DIR: join(wA, 'recordings'), MEDRECORD_KEY_FILE: join(wA, '.key') },
+  env: { ...process.env, MEDRECORD_OPEN: '1', PORT: '3410', NODE_ENV: 'development', MEDRECORD_DATA_DIR: join(wA, 'recordings'), MEDRECORD_KEY_FILE: join(wA, '.key') },
   stdio: 'ignore',
 });
 const A = 'http://localhost:3410';
@@ -91,7 +91,7 @@ writeFileSync(join(DB, 'old-rec.json'), JSON.stringify({
   audioFile: 'old-rec.audio', audioEnc: true, createdAt: old, updatedAt: old,
 }));
 const srvB = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: '3411', NODE_ENV: 'development', MEDRECORD_DATA_DIR: DB, MEDRECORD_KEY_FILE: join(wB, '.key'),
+  env: { ...process.env, MEDRECORD_OPEN: '1', PORT: '3411', NODE_ENV: 'development', MEDRECORD_DATA_DIR: DB, MEDRECORD_KEY_FILE: join(wB, '.key'),
          MEDRECORD_AUDIO_RETENTION_DAYS: '7' },   // retención 7 días → la de 10 días vence
   stdio: 'ignore',
 });

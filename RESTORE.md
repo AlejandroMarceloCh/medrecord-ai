@@ -26,9 +26,22 @@ Por eso el `.tar.gz` es tan sensible como los datos: guárdalo en un destino seg
    mv data/.master.key /tu/ruta/configurada/.master.key
    ```
 5. Arranca el servidor. En el log debe decir "Restauradas N grabaciones desde disco".
-   Si ves "Sidecar corrupto" o la lista sale vacía, la clave no corresponde a esos datos.
+
+## Si la clave no corresponde a los datos
+
+El servidor **no arranca**, a propósito. Verás uno de estos mensajes:
+
+- *"Ninguno de los N sidecars se pudo descifrar. La clave maestra no corresponde a estos
+  datos"* → restauraste los datos con la clave equivocada. Las historias **no se tocaron**:
+  vuelve a extraer el backup completo, con su `.master.key`.
+- *"Clave maestra inválida: N bytes, se esperaban 32"* → el archivo de la clave se copió a
+  medias. Vuelve a extraerlo del `.tar.gz`.
+- *"No se pudo descifrar users.json"* → mezclaste la clave de un backup con los datos de otro.
+
+Ninguno de estos casos regenera la clave ni pone las historias en cuarentena. Antes el
+servidor arrancaba igual y renombraba todo a `.corrupt` en silencio, que es la forma más
+rápida de perder una historia clínica creyendo que la restauraste.
 
 ## Verificación rápida
 
 Tras arrancar, entra a la web y confirma que las historias se leen (nombres, campos).
-Si todo sale vacío o ilegible: la `.master.key` del backup no es la que cifró esos datos.

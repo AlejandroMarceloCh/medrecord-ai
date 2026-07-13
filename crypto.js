@@ -9,6 +9,9 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// Error de arranque: el sistema se niega a hacer algo destructivo. No es un bug.
+function bootError(msg) { const e = new Error(msg); e.code = 'MEDRECORD_BOOT'; return e; }
+
 const ALGO = 'aes-256-gcm';
 const IV_LEN = 12;
 const TAG_LEN = 16;
@@ -17,12 +20,28 @@ function keyPath() {
   return process.env.MEDRECORD_KEY_FILE || path.join(__dirname, 'data', '.master.key');
 }
 
+// Una clave existente NUNCA se regenera. Si el archivo está presente pero es inválido
+// (copia interrumpida, restore a medias, disco lleno al escribirla), abortamos: pisarlo
+// con una clave nueva volvería irrecuperable toda la data cifrada, sin aviso.
 function loadOrCreateKey() {
   const p = keyPath();
+  let raw = null;
   try {
-    const raw = fs.readFileSync(p);
-    if (raw.length >= 32) return raw.subarray(0, 32);
-  } catch { /* no existe → la creamos */ }
+    raw = fs.readFileSync(p);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      throw bootError(`No se pudo leer la clave maestra en ${p}: ${err.message}. NO se genera una nueva (destruiría los datos cifrados).`);
+    }
+  }
+  if (raw) {
+    if (raw.length !== 32) {
+      throw bootError(
+        `Clave maestra inválida en ${p}: ${raw.length} bytes, se esperaban 32. ` +
+        `NO se regenera. Restaura la clave correcta desde el backup (ver RESTORE.md).`
+      );
+    }
+    return raw;
+  }
   const key = crypto.randomBytes(32);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, key, { mode: 0o600 });

@@ -44,7 +44,7 @@ writeFileSync(join(D1, 'corrupt-one.json'), '{esto no es json ni descifrable');
 writeFileSync(join(D1, 'good-rec.json'), JSON.stringify({ id: 'good-rec', patient: { name: 'Buena' }, status: 'reviewed', reviewed: true, createdAt: Date.now() }));
 
 const srv1 = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: '3408', NODE_ENV: 'development', MEDRECORD_DATA_DIR: D1, MEDRECORD_KEY_FILE: join(w1, '.key') },
+  env: { ...process.env, PORT: '3408', NODE_ENV: 'development', MEDRECORD_OPEN: '1', MEDRECORD_DATA_DIR: D1, MEDRECORD_KEY_FILE: join(w1, '.key') },
   stdio: 'ignore',
 });
 try {

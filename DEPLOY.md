@@ -24,14 +24,39 @@ las llamadas `/api/...` y el WebSocket necesitan un backend en algún lado.
 Todo corre en tu Mac. Lo expones con un túnel https (necesario para que el micrófono del
 celular funcione). Privado (nada sale de tu máquina), gratis, 5 minutos.
 
+**Paso 1 — crea el admin. No es opcional.** Un túnel publica el puerto en internet: sin
+usuario configurado, cualquiera con la URL leería todas las historias. Por eso el server
+se niega a arrancar sin autenticación.
+
 ```bash
 npm install
-npm start                                   # o npm run dev
-# en otra terminal:
+
+# Primer arranque: crea el admin (solo hace falta una vez; queda cifrado en disco).
+MEDRECORD_ADMIN_USER=alejandro \
+MEDRECORD_ADMIN_PASS='una-clave-larga-de-verdad' \
+npm start
+
+# Arranques siguientes: ya no necesitas las variables.
+npm start
+```
+
+**Paso 2 — el túnel:**
+
+```bash
 cloudflared tunnel --url http://localhost:3000     # o: ngrok http 3000
 ```
+
 Te da una URL `https://algo.trycloudflare.com`. En el celular abre `…/mobile`, en la
-laptop `…/web`. Listo.
+laptop `…/web`, y entras con el usuario del paso 1.
+
+**Aviso sobre el túnel gratuito:** la URL **cambia en cada arranque**. Para uso diario eso
+significa reinstalar el PWA y perder el `localStorage` (token, ajustes, diccionario) todos
+los días. Para un piloto real: named tunnel con dominio propio, o **Tailscale** — que además
+no expone nada a internet público y hace que el micrófono funcione igual.
+
+**Respalda `data/.master.key` antes de exponer nada.** Sin ella, los datos cifrados son
+irrecuperables; y si el archivo se daña, el server aborta en vez de regenerarla (ver
+`RESTORE.md`).
 
 ### Opción 2 — Frontend en Vercel + backend tuyo (Mac por túnel, o EC2)
 Subes solo el frontend estático a Vercel y lo apuntas a tu backend.

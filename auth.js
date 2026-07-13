@@ -10,6 +10,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const enc = require('./crypto');
 
+// Error de arranque: el sistema se niega a hacer algo destructivo. No es un bug.
+function bootError(msg) { const e = new Error(msg); e.code = 'MEDRECORD_BOOT'; return e; }
+
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 12 * 60 * 60 * 1000); // 12 h
 const COOKIE = 'medrecord.sid';
 
@@ -27,12 +30,32 @@ function init(dataDir) {
   loadUsers();
 }
 
+// "No hay archivo" y "no puedo descifrarlo" son cosas distintas. Confundirlas hace que
+// una clave rotada o un disco con errores arranquen el server con CERO usuarios, lo que
+// desactivaría la autenticación en silencio. Si el archivo existe y no abre, abortamos.
 function loadUsers() {
   users.clear();
+  let raw = null;
   try {
-    const json = enc.readEncrypted(usersFile).toString('utf8');
-    for (const u of JSON.parse(json)) users.set(u.id, u);
-  } catch { /* no existe aún */ }
+    raw = fs.readFileSync(usersFile);
+  } catch (err) {
+    if (err.code === 'ENOENT') return;     // primer arranque: aún no hay usuarios
+    throw bootError(`No se pudo leer ${usersFile}: ${err.message}`);
+  }
+  // Archivo vacío = todavía no hay usuarios (un tar interrumpido, un touch). No es
+  // corrupción: tratarlo como tal dejaría el server caído sin necesidad.
+  if (raw.length === 0) return;
+  let json;
+  try {
+    json = enc.decryptBuffer(raw).toString('utf8');
+  } catch (err) {
+    throw bootError(
+      `No se pudo descifrar ${usersFile} (${err.message}). ` +
+      `La clave maestra no corresponde a estos datos, o el archivo está dañado. ` +
+      `Arrancar así desactivaría la autenticación: abortando.`
+    );
+  }
+  for (const u of JSON.parse(json)) users.set(u.id, u);
 }
 
 function saveUsers() {
@@ -79,14 +102,27 @@ function authenticate(username, password) {
   return u;
 }
 
+// Contraseñas que aparecen en la documentación del repo: si alguien las usa de verdad,
+// la credencial es pública. Rechazarlas es más útil que confiar en que se acuerde.
+const PLACEHOLDER_PASSWORDS = new Set([
+  'cambia-esta-clave',
+  'una-clave-larga-que-elijas-tu',
+  'una-clave-larga-de-verdad',
+]);
+
 // Crea admin inicial desde variables de entorno si no hay ningún usuario.
 function bootstrapAdmin() {
   if (users.size > 0) return;
   const u = process.env.MEDRECORD_ADMIN_USER, p = process.env.MEDRECORD_ADMIN_PASS;
-  if (u && p) {
-    createUser({ username: u, password: p, name: 'Administrador', role: 'admin' });
-    console.log(`  Auth: usuario admin "${u}" creado desde variables de entorno`);
+  if (!u || !p) return;
+  if (PLACEHOLDER_PASSWORDS.has(p)) {
+    throw bootError(
+      `MEDRECORD_ADMIN_PASS es la contraseña de ejemplo de la documentación, o sea que es pública. ` +
+      `Elige una clave propia antes de arrancar.`
+    );
   }
+  createUser({ username: u, password: p, name: 'Administrador', role: 'admin' });
+  console.log(`  Auth: usuario admin "${u}" creado desde variables de entorno`);
 }
 
 // ── Sesiones ──

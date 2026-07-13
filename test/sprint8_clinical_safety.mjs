@@ -64,7 +64,7 @@ const put = (body) => fetch(`${BASE}/api/recordings/${ID}/fields`, {
 });
 
 const srv = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_DATA_DIR: DATA, MEDRECORD_KEY_FILE: KEY },
+  env: { ...process.env, MEDRECORD_OPEN: '1', PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_DATA_DIR: DATA, MEDRECORD_KEY_FILE: KEY },
   stdio: 'ignore',
 });
 

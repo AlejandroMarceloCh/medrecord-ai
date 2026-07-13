@@ -1,3 +1,16 @@
+// Los guardrails de arranque (clave maestra inválida, users.json indescifrable, todos
+// los sidecars sin abrir) abortan lanzando. Sin esto el operador ve un stack trace de
+// Node y lo lee como un crash, cuando en realidad es el sistema negándose a hacer algo
+// destructivo. Se registra antes que nada para cubrir también los require() de abajo.
+process.on('uncaughtException', (err) => {
+  if (err && err.code === 'MEDRECORD_BOOT') {
+    console.error('\n  MedRecord no arrancó:\n');
+    console.error('  ' + err.message + '\n');
+    process.exit(1);
+  }
+  throw err;   // un bug de verdad: que se vea el stack completo
+});
+
 const express = require('express');
 const compression = require('compression');
 const multer = require('multer');
@@ -11,6 +24,9 @@ const { transcribe, checkEnv } = require('./whisper');
 const llm = require('./llm');
 const enc = require('./crypto');
 const auth = require('./auth');
+
+// Error de arranque: el sistema se niega a hacer algo destructivo. No es un bug.
+function bootError(msg) { const e = new Error(msg); e.code = 'MEDRECORD_BOOT'; return e; }
 
 // Para logs: nunca imprimas el id completo ni PII, solo un prefijo no identificable.
 const shortId = (id) => String(id || '').slice(0, 8);
@@ -62,6 +78,9 @@ async function withAudioFile(rec, fn) {
     fs.writeFileSync(tmpFile, enc.readEncrypted(stored));
     return await fn(tmpFile);
   } finally {
+    // El audio queda en claro en /tmp mientras Whisper lo procesa: sobrescribirlo antes
+    // de borrarlo, o el contenido sigue siendo recuperable del disco.
+    enc.secureDelete(tmpFile);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
@@ -72,6 +91,7 @@ function loadAll() {
   let files = [];
   try { files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.json')); } catch { /* noop */ }
   let corrupt = 0;
+  const failed = [];
   for (const f of files) {
     const fp = path.join(DATA_DIR, f);
     try {
@@ -86,9 +106,23 @@ function loadAll() {
     } catch {
       // No se pudo descifrar ni parsear: ponlo en cuarentena en vez de perderlo en silencio.
       corrupt++;
-      try { fs.renameSync(fp, fp + '.corrupt'); } catch { /* noop */ }
-      console.error('Sidecar corrupto movido a .corrupt:', shortId(f));  // sin contenido
+      failed.push(fp);
     }
+  }
+
+  // Un sidecar suelto que no abre es corrupción. TODOS los sidecars sin abrir no es
+  // corrupción: es la clave maestra equivocada. Poner en cuarentena la historia clínica
+  // completa por un restore con la key errada sería catastrófico y silencioso — abortamos.
+  if (files.length && corrupt === files.length) {
+    throw bootError(
+      `Ninguno de los ${files.length} sidecars de ${DATA_DIR} se pudo descifrar. ` +
+      `La clave maestra no corresponde a estos datos (¿restore con la key equivocada?). ` +
+      `NO se ponen en cuarentena: restaura la clave correcta (ver RESTORE.md).`
+    );
+  }
+  for (const fp of failed) {
+    try { fs.renameSync(fp, fp + '.corrupt'); } catch { /* noop */ }
+    console.error('Sidecar corrupto movido a .corrupt:', shortId(path.basename(fp)));  // sin contenido
   }
 
   // Reanudar las que quedaron a medias, SERIALIZADO: re-disparar todas a la vez tras
@@ -114,8 +148,21 @@ function loadAll() {
 }
 
 // Retención de audio: tras el período configurado, borra de forma SEGURA el audio de
-// las consultas ya firmadas (la nota se conserva). 0 = desactivado (no purga nada).
-const AUDIO_RETENTION_DAYS = Number(process.env.MEDRECORD_AUDIO_RETENTION_DAYS || 0);
+// las consultas ya firmadas (la nota se conserva).
+//
+// La política se EXIGE explícitamente: no hay default. Un default silencioso borraría
+// audio ya existente en el primer arranque tras actualizar el código —destruir datos de
+// salud como efecto secundario de un `git pull` es inaceptable—, y un default de "nunca
+// borrar" incumple la minimización (el audio de una consulta es dato sensible). Así que
+// el operador decide y lo dice, y si no lo dice, se lo recordamos en cada arranque.
+const RETENTION_SET = process.env.MEDRECORD_AUDIO_RETENTION_DAYS !== undefined;
+const AUDIO_RETENTION_DAYS = RETENTION_SET
+  ? Number(process.env.MEDRECORD_AUDIO_RETENTION_DAYS)
+  : 0;
+if (!RETENTION_SET) {
+  console.warn('  Retención de audio SIN CONFIGURAR: el audio de las consultas se guarda indefinidamente.');
+  console.warn('  Es dato de salud. Define MEDRECORD_AUDIO_RETENTION_DAYS=90 (o el plazo que decidas).');
+}
 function purgeExpiredAudio() {
   if (!AUDIO_RETENTION_DAYS) return 0;
   const cutoff = Date.now() - AUDIO_RETENTION_DAYS * 86400000;
@@ -162,6 +209,11 @@ app.get('/health', async (_req, res) => res.json({
 // si no hay ninguno (dev), las rutas quedan abiertas para no romper el flujo local.
 const REQUIRED_TOKEN = process.env.MEDRECORD_TOKEN || '';
 const cookieSecure = PROD;
+
+// Modo abierto (sin autenticación). Es OPT-IN EXPLÍCITO, nunca un default: antes, no
+// configurar un admin dejaba /api y el WebSocket sirviendo historias completas a
+// cualquiera que alcanzara el puerto — que es exactamente lo que pasa detrás de un túnel.
+const OPEN_MODE = process.env.MEDRECORD_OPEN === '1';
 
 // Resuelve req.identity en cada request a /api.
 app.use('/api', (req, _res, next) => {
@@ -215,6 +267,20 @@ app.post('/api/logout', (req, res) => {
 
 const authRequired = () => auth.countUsers() > 0 || !!REQUIRED_TOKEN;
 
+// Fail-closed: sin usuarios, sin token y sin opt-in explícito, el server NO sirve.
+// Antes arrancaba abierto y `npm start` + túnel (el deploy que documentábamos) dejaba
+// todas las historias accesibles sin una sola credencial.
+if (!authRequired() && !OPEN_MODE) {
+  console.error('\n  MedRecord no puede arrancar sin autenticación.\n');
+  console.error('  No hay usuarios creados ni MEDRECORD_TOKEN configurado. Arrancar así');
+  console.error('  dejaría las historias clínicas accesibles sin credenciales.\n');
+  console.error('  Crea el admin inicial:');
+  console.error('    MEDRECORD_ADMIN_USER=... MEDRECORD_ADMIN_PASS=... npm start\n');
+  console.error('  O, solo para desarrollo local, acepta el riesgo explícitamente:');
+  console.error('    MEDRECORD_OPEN=1 npm run dev\n');
+  process.exit(1);
+}
+
 app.get('/api/whoami', (req, res) => {
   if (req.identity && req.identity.kind === 'user') {
     return res.json({ user: { id: req.identity.id, name: req.identity.name, role: req.identity.role }, required: authRequired() });
@@ -226,8 +292,8 @@ app.get('/api/whoami', (req, res) => {
 const OPEN_PATHS = new Set(['/login', '/logout', '/whoami']);
 app.use('/api', (req, res, next) => {
   if (OPEN_PATHS.has(req.path)) return next();
-  if (!authRequired()) return next();          // dev sin usuarios → abierto
   if (req.identity) return next();
+  if (!authRequired() && OPEN_MODE) return next();   // dev con opt-in explícito
   res.status(401).json({ error: 'no autorizado' });
 });
 
@@ -408,7 +474,7 @@ function coerceFields(fields) {
 // ¿Esta identidad puede LEER este registro? Aislamiento por dueño.
 // El device (token de subida del móvil) es SOLO ESCRITURA: no lee historias.
 function canSee(identity, rec) {
-  if (!identity) return true;                 // dev sin usuarios → abierto
+  if (!identity) return OPEN_MODE;            // sin identidad solo se lee en modo abierto
   if (identity.kind === 'device') return false;
   if (identity.role === 'admin') return true;
   return rec.ownerId === identity.id;
@@ -543,8 +609,12 @@ app.delete('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   recordings.delete(r.id);
-  try { fs.rmSync(metaPath(r.id), { force: true }); } catch { /* noop */ }
-  if (r.audioFile) { try { fs.rmSync(path.join(DATA_DIR, r.audioFile), { force: true }); } catch { /* noop */ } }
+  // Borrado SEGURO (sobrescribe antes de desenlazar), igual que la purga por retención:
+  // este es el camino por el que el paciente ejerce su derecho de supresión. Un rmSync
+  // deja el ciphertext recuperable del disco, y la clave está en la misma máquina.
+  enc.secureDelete(metaPath(r.id));
+  try { fs.rmSync(metaPath(r.id) + '.tmp', { force: true }); } catch { /* noop */ }
+  if (r.audioFile) enc.secureDelete(path.join(DATA_DIR, r.audioFile));
   auth.audit({ action: 'delete', user: req.identity?.id || null, rec: r.id });
   broadcastRaw({ type: 'recording:deleted', id: r.id });   // solo id, sin PII
   res.json({ ok: true });

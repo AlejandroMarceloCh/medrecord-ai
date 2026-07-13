@@ -10,7 +10,7 @@
     "build": "node build.mjs",
     "start": "NODE_ENV=production node server.js",
     "preview": "npm run build && npm start",
-    "test": "for f in test/sprint3_evidence.mjs test/sprint4_export.mjs test/sprint5_security.mjs test/sprint6_autofill_backup.mjs test/sprint7_encryption.mjs test/sprint8_clinical_safety.mjs test/sprint9_multiuser.mjs test/sprint10_p0.mjs test/sprint11_integridad.mjs test/sprint12_ux.mjs test/sprint13_robustez.mjs test/sprint14_legal.mjs; do echo \"=== $f ===\"; node \"$f\" || exit 1; done"
+    "test": "for f in test/sprint3_evidence.mjs test/sprint4_export.mjs test/sprint5_security.mjs test/sprint6_autofill_backup.mjs test/sprint7_encryption.mjs test/sprint8_clinical_safety.mjs test/sprint9_multiuser.mjs test/sprint10_p0.mjs test/sprint11_integridad.mjs test/sprint12_ux.mjs test/sprint13_robustez.mjs test/sprint14_legal.mjs test/sprint16_cerrojo.mjs; do echo \"=== $f ===\"; node \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=18"

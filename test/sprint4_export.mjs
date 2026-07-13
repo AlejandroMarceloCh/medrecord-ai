@@ -54,7 +54,7 @@ const results = [];
 const add = (name, ok, detail) => results.push({ name, ok, detail });
 
 writeFileSync(SIDECAR, JSON.stringify(demo));
-const srv = spawn('node', ['server.js'], { env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development' }, stdio: 'ignore' });
+const srv = spawn('node', ['server.js'], { env: { ...process.env, MEDRECORD_OPEN: '1', PORT: String(PORT), NODE_ENV: 'development' }, stdio: 'ignore' });
 
 try {
   await waitHealth();

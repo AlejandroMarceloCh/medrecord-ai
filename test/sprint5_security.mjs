@@ -50,7 +50,7 @@ const add = (name, ok, detail) => results.push({ name, ok, detail });
 writeFileSync(SIDECAR, JSON.stringify(demo));
 // Server arranca con MEDRECORD_TOKEN seteado → auth activo
 const srv = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_TOKEN: TOKEN,
+  env: { ...process.env, MEDRECORD_OPEN: '1', PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_TOKEN: TOKEN,
          MEDRECORD_DATA_DIR: DIR, MEDRECORD_KEY_FILE: KEY },
   stdio: 'ignore',
 });

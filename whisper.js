@@ -6,6 +6,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const enc = require('./crypto');
 
 const HOME = os.homedir();
 const WHISPER_HOME = process.env.WHISPER_HOME
@@ -107,6 +108,11 @@ async function transcribe(inputPath, { lang = LANG, prompt = MEDICAL_PROMPT } = 
     const text = dedupeLines(fs.readFileSync(txtPath, 'utf8')).trim();
     return { text };
   } finally {
+    // Los dos temporales son PHI en claro: el WAV es el audio de la consulta y out.txt es
+    // la transcripción completa. Sobrescribirlos antes de desenlazarlos; un unlink a secas
+    // los deja recuperables del disco.
+    enc.secureDelete(wav);
+    enc.secureDelete(outPrefix + '.txt');
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
