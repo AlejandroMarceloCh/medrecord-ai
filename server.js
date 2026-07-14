@@ -125,11 +125,11 @@ function loadAll() {
     console.error('Sidecar corrupto movido a .corrupt:', shortId(path.basename(fp)));  // sin contenido
   }
 
-  // Reanudar las que quedaron a medias, SERIALIZADO: re-disparar todas a la vez tras
-  // un crash satura Whisper/Ollama. El resto del pipeline asume "una a la vez".
+  // Reanudar las que quedaron a medias. Van por la MISMA cola que las subidas en vivo:
+  // es la única forma de que un crash con 10 pendientes no arranque 10 Whisper a la vez.
   const toResume = [];
   for (const rec of recordings.values()) {
-    if (rec.status === 'received' || rec.status === 'processing' || rec.status === 'filling') {
+    if (rec.status === 'received' || rec.status === 'processing' || rec.status === 'filling' || rec.status === 'queued') {
       if (rec.audioFile && fs.existsSync(path.join(DATA_DIR, rec.audioFile))) {
         rec.status = 'received';
         toResume.push(rec);
@@ -140,9 +140,7 @@ function loadAll() {
       }
     }
   }
-  if (toResume.length) {
-    (async () => { for (const rec of toResume) { try { await processRecording(rec); } catch { /* noop */ } } })();
-  }
+  for (const rec of toResume) enqueueProcess(rec);
   if (corrupt) console.log(`  ${corrupt} grabación(es) corrupta(s) puestas en cuarentena (.corrupt)`);
   if (recordings.size) console.log(`  Restauradas ${recordings.size} grabaciones desde disco`);
 }
@@ -357,8 +355,62 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
   res.json({ id, status: rec.status });
 
   broadcastRec('recording:received', rec);
-  processRecording(rec).catch((e) => { console.error('proc error', shortId(id), e.message); });
+  enqueueProcess(rec);   // la cola serializa: nunca dos Whisper a la vez
 });
+
+// ── Cola del pipeline (concurrencia 1) ──────────────────────────────────────────
+// Whisper carga un modelo de ~3 GB POR PROCESO y corre con todos los cores; Ollama
+// mantiene otros ~4.7 GB residentes. Dos transcripciones a la vez en una Mac de 16 GB
+// mandan la máquina a swap y cada job se vuelve 3-5x más lento — y con el timeout
+// corriendo, se matan entre sí en cascada. En emergencia llegan 5 audios en 3 minutos.
+//
+// loadAll() ya serializaba el resume tras un crash ("el resto del pipeline asume una a
+// la vez"), pero el camino en vivo no lo hacía. Ahora todo pasa por esta cola.
+const jobQueue = [];        // ids en espera, en orden de llegada
+let jobRunning = null;      // id del que está corriendo, o null
+
+// La posición en la cola es lo que el médico necesita ver: "vas 3 de 5".
+function refreshQueuePositions() {
+  jobQueue.forEach((id, i) => {
+    const rec = recordings.get(id);
+    if (!rec) return;
+    const pos = i + 1;
+    if (rec.queuePos !== pos) {
+      rec.queuePos = pos;
+      broadcastRec('recording:queued', rec);
+    }
+  });
+}
+
+function enqueueProcess(rec) {
+  if (!recordings.has(rec.id)) return;
+  if (jobRunning === rec.id || jobQueue.includes(rec.id)) return;   // ya está en vuelo
+  jobQueue.push(rec.id);
+  if (jobRunning) {
+    rec.queuePos = jobQueue.length;
+    setStatus(rec, 'queued', 'recording:queued');
+  }
+  runNextJob();
+}
+
+async function runNextJob() {
+  if (jobRunning) return;
+  const id = jobQueue.shift();
+  if (!id) return;
+  const rec = recordings.get(id);       // pudo borrarse mientras esperaba
+  if (!rec) return runNextJob();
+  jobRunning = id;
+  rec.queuePos = 0;
+  refreshQueuePositions();
+  try {
+    await processRecording(rec);
+  } catch (err) {
+    console.error('proc error', shortId(id), err.message);
+  } finally {
+    jobRunning = null;
+    runNextJob();
+  }
+}
 
 // Mínimo de caracteres para considerar una transcripción válida (filtra silencio/ruido).
 const MIN_TRANSCRIPT = 10;
@@ -373,17 +425,32 @@ function setStatus(rec, status, evt) {
 }
 
 // Corre Whisper, luego (si hay LLM local) autollena campos. Dispara eventos a la web.
+// ¿Sigue siendo legítimo escribir sobre este registro? Se pregunta DESPUÉS de cada await:
+// entre que el job entró a la cola y aterriza pueden pasar minutos, y en ese lapso el
+// médico pudo borrar la grabación o firmar la historia. Pisar una historia firmada deja la
+// firma HMAC inválida sobre un contenido que el médico nunca vio — /verify la reporta como
+// adulterada. La cola de este sprint alargó esa ventana de milisegundos a minutos.
+function jobVigente(rec) {
+  if (recordings.get(rec.id) !== rec) return false;   // borrada (o reemplazada) mientras esperaba
+  if (rec.reviewed) return false;                     // firmada mientras esperaba: es inmutable
+  return true;
+}
+
 async function processRecording(rec) {
+  if (!jobVigente(rec)) return;
   setStatus(rec, 'processing', 'recording:processing');
   let text;
   try {
+    // El timeout lo decide whisper.js midiendo el WAV; el durationSec del cliente no influye.
     ({ text } = await withAudioFile(rec, (p) => transcribe(p)));
-    rec.transcript = text;
   } catch (err) {
+    if (!jobVigente(rec)) return;
     rec.error = String(err.message || err);
     setStatus(rec, 'error', 'recording:error');
     return;
   }
+  if (!jobVigente(rec)) return;      // se firmó/borró mientras Whisper corría
+  rec.transcript = text;
 
   // Audio sin voz: Whisper puede devolver vacío. No es éxito — pedir regrabar.
   if (!text || text.trim().length < MIN_TRANSCRIPT) {
@@ -400,14 +467,20 @@ async function processRecording(rec) {
   setStatus(rec, 'filling', 'recording:transcribed');
 
   // Fase 2: autollenado de campos con el LLM local
+  let ex = null, fieldsErr = null;
   try {
-    const ex = await llm.extractFields(text, { patient: rec.patient, date: rec.createdAt });
+    ex = await llm.extractFields(text, { patient: rec.patient, date: rec.createdAt });
+  } catch (err) {
+    fieldsErr = String(err.message || err);
+  }
+  if (!jobVigente(rec)) return;      // se firmó/borró mientras el LLM corría
+  if (ex) {
     rec.fields = ex.fields;
     rec.sources = ex.sources;
     rec.fields_ia = deepCopy(ex.fields);   // snapshot intacto de lo que generó la IA (trazabilidad)
     rec.confirmed = [];
-  } catch (err) {
-    rec.fieldsError = String(err.message || err);
+  } else {
+    rec.fieldsError = fieldsErr;
   }
   setStatus(rec, 'done', 'recording:filled');
 }
@@ -443,6 +516,7 @@ function publicRec(r) {
     reviewed: !!r.reviewed, reviewedAt: r.reviewedAt || null,
     signature: r.signature || null, consent: r.consent || null, audioDeleted: !!r.audioDeleted,
     ownerId: r.ownerId || null, version: r.version || 0,
+    queuePos: r.queuePos || 0,   // "vas 3 de 5" mientras espera su turno de Whisper
     createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
 }
@@ -551,6 +625,19 @@ app.put('/api/recordings/:id/fields', (req, res) => {
     }
   }
 
+  // Una historia firmada tiene valor legal: no puede estar VACÍA. El gate de arriba solo
+  // corre si hubo IA (`fields_ia`); cuando Whisper falla no hay IA, así que sin este
+  // segundo gate se podía firmar un cascarón sin transcripción y sin un solo campo.
+  // Llenar a mano tras un fallo de Whisper es legítimo — firmar la nada, no.
+  if (wantReview) {
+    const propuestos = (fields && typeof fields === 'object') ? coerceFields(fields) : r.fields;
+    const hayContenido = propuestos && Object.values(propuestos)
+      .some(sec => sec && Object.values(sec).some(v => String(v || '').trim()));
+    if (!hayContenido) {
+      return res.status(400).json({ error: 'no se puede firmar una historia vacía: escribe al menos un campo' });
+    }
+  }
+
   if (fields && typeof fields === 'object') r.fields = coerceFields(fields);
   if (confirmed) r.confirmed = confirmed;   // qué confirmó el médico (trazabilidad)
   if (req.body && req.body.patient && typeof req.body.patient === 'object') {
@@ -579,8 +666,12 @@ app.post('/api/recordings/:id/retry', (req, res) => {
     return res.status(409).json({ error: 'no hay audio para reprocesar' });
   }
   r.error = null; r.fieldsError = null; r.transcript = null; r.fields = null; r.sources = null; r.fields_ia = null; r.confirmed = []; r.reviewed = false;
+  // El retry DESTRUYE contenido (transcripción y campos). Si no avanza la versión, una web
+  // que tenía el registro abierto sigue creyendo que va en la versión vieja, pasa el
+  // optimistic lock y sobrescribe con datos que ya no existen. Lost update sin ningún 409.
+  r.version = (r.version || 0) + 1;
   res.json({ ok: true });
-  processRecording(r).catch(() => {});
+  enqueueProcess(r);   // el reintento también compite por el único slot de Whisper
 });
 
 // Reintentar SOLO el autollenado (reusa la transcripción ya hecha, no re-transcribe).

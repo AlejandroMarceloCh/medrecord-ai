@@ -25,7 +25,36 @@ const MODEL = process.env.WHISPER_MODEL || defaultModel();
 const VAD   = process.env.WHISPER_VAD   || path.join(WHISPER_HOME, 'models/ggml-silero-v5.1.2-v6.2.1-ggml.bin');
 const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const LANG = process.env.WHISPER_LANG || 'es';
+// Timeout por DURACIÓN del audio, no de reloj de pared. Un tope fijo de 20 min mata una
+// consulta de 30 min a mitad de camino, y el médico solo ve "no se pudo transcribir" →
+// toca Reintentar → vuelve a fallar. Cascada.
+//
+// FACTOR = cuántos segundos de cómputo por segundo de audio toleramos antes de rendirnos.
+// large-v3 en una Mac ronda 0.5-1x tiempo real; 6x deja margen para una máquina cargada.
+// Si no sabemos la duración (grabación legacy), caemos al tope fijo de antes.
+const TIMEOUT_FACTOR = Number(process.env.WHISPER_TIMEOUT_FACTOR || 6);
+const TIMEOUT_MIN_MS = 5 * 60 * 1000;
+const TIMEOUT_MAX_MS = Number(process.env.WHISPER_TIMEOUT_MAX_MS || 3 * 60 * 60 * 1000);
 const TIMEOUT_MS = Number(process.env.WHISPER_TIMEOUT_MS || 20 * 60 * 1000);
+
+function timeoutFor(durationSec) {
+  if (process.env.WHISPER_TIMEOUT_MS) return TIMEOUT_MS;   // override explícito
+  const d = Number(durationSec);
+  if (!Number.isFinite(d) || d <= 0) return TIMEOUT_MS;    // duración desconocida
+  const ms = d * TIMEOUT_FACTOR * 1000;
+  return Math.min(TIMEOUT_MAX_MS, Math.max(TIMEOUT_MIN_MS, ms));
+}
+
+// Duración exacta del WAV que genera ffmpeg: PCM 16 kHz mono 16-bit = 32.000 bytes/segundo.
+// Un stat basta; no hace falta ffprobe ni creerle la duración al cliente.
+const WAV_BYTES_PER_SEC = 16000 * 2;
+function wavDurationSec(wavPath) {
+  try {
+    const sz = fs.statSync(wavPath).size;
+    if (sz > 44) return (sz - 44) / WAV_BYTES_PER_SEC;   // 44 = cabecera RIFF
+  } catch { /* el WAV no existe o no se puede leer */ }
+  return 0;
+}
 
 // Vocabulario clínico: sin esto whisper transcribe mal los términos médicos.
 const MEDICAL_PROMPT = process.env.WHISPER_PROMPT || [
@@ -91,6 +120,13 @@ async function transcribe(inputPath, { lang = LANG, prompt = MEDICAL_PROMPT } = 
     await run(FFMPEG, ['-i', inputPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', '-y', wav, '-loglevel', 'error'],
       { timeout: 2 * 60 * 1000 });
 
+    // La duración REAL se mide sobre el WAV que acabamos de generar. El cliente NO influye
+    // en el timeout, ni siquiera como respaldo: un durationSec inflado reservaría el único
+    // slot de la cola durante horas y dejaría el turno entero detrás. Si la medición falla
+    // (WAV vacío o corrupto), caemos al tope fijo — y en ese caso Whisper va a fallar
+    // enseguida de todos modos, porque no hay audio que transcribir.
+    const budgetMs = timeoutFor(wavDurationSec(wav));
+
     // 2) whisper-cli (receta "standard" anti-bucle + VAD + prompt de dominio)
     const ncpu = String(os.cpus().length || 4);
     const args = [
@@ -101,7 +137,7 @@ async function transcribe(inputPath, { lang = LANG, prompt = MEDICAL_PROMPT } = 
       '-t', ncpu,
     ];
     if (prompt) args.push('--prompt', prompt, '--carry-initial-prompt');
-    await run(BIN, args, { timeout: TIMEOUT_MS });
+    await run(BIN, args, { timeout: budgetMs });
 
     const txtPath = outPrefix + '.txt';
     if (!fs.existsSync(txtPath)) throw new Error('whisper no generó transcripción');
@@ -117,4 +153,4 @@ async function transcribe(inputPath, { lang = LANG, prompt = MEDICAL_PROMPT } = 
   }
 }
 
-module.exports = { transcribe, checkEnv, MEDICAL_PROMPT };
+module.exports = { transcribe, checkEnv, MEDICAL_PROMPT, timeoutFor };

@@ -8,7 +8,7 @@ import {
 
 const TABS = [
   { key:'pending',    label:'Por revisar',  filter: r => r.status==='done'||r.status==='error' },
-  { key:'processing', label:'En proceso',   filter: r => ['received','processing','filling'].includes(r.status) },
+  { key:'processing', label:'En proceso',   filter: r => ['received','queued','processing','filling'].includes(r.status) },
   { key:'reviewed',   label:'Revisadas',    filter: r => r.status==='reviewed' },
 ];
 
@@ -19,7 +19,7 @@ function RecCard({ rec, onClick, showDate }) {
   const color    = avatarColor(initials);
   const age      = recAge(rec);
   const isError  = rec.status === 'error';
-  const isProc   = ['received','processing','filling'].includes(rec.status);
+  const isProc   = ['received','queued','processing','filling'].includes(rec.status);
   const isReviewed = rec.status === 'reviewed';
   const pct      = recCompletion(rec);
   const summary  = recSummary(rec);
@@ -122,7 +122,7 @@ export function ListingView({ recs, tab, setTab, sort, setSort, onSelect }) {
 
   const counts = useMemo(() => ({
     pending:    recs.filter(r => r.status==='done'||r.status==='error').length,
-    processing: recs.filter(r => ['received','processing','filling'].includes(r.status)).length,
+    processing: recs.filter(r => ['received','queued','processing','filling'].includes(r.status)).length,
     reviewed:   recs.filter(r => r.status==='reviewed').length,
   }), [recs]);
 

@@ -57,6 +57,33 @@ async function available() {
   } catch { return false; }
 }
 
+// Índice de la transcripción con los espacios en blanco colapsados, más un mapa de vuelta
+// a los offsets originales.
+//
+// Por qué hace falta: whisper.cpp separa los segmentos con saltos de línea, y el LLM cita
+// las frases sin ellos. El indexOf literal fallaba en CUALQUIER cita que cruzara un salto,
+// así que sobre audio real la validación descartaba TODAS las fuentes y el resaltado de
+// evidencia quedaba vacío — en silencio. La feature que justifica confiar en la IA estaba
+// muerta y ningún test lo veía (los tests usan transcripciones de una sola línea).
+//
+// Colapsar espacios NO relaja la garantía: seguimos exigiendo que la cita exista de verdad
+// en el audio, solo dejamos de exigir que coincidan los saltos de línea.
+function indexTranscript(transcript) {
+  const chars = [];
+  const map = [];           // posición i del texto normalizado → posición en el original
+  let enEspacio = false;
+  for (let i = 0; i < transcript.length; i++) {
+    const c = transcript[i];
+    if (/\s/.test(c)) {
+      if (enEspacio) continue;              // colapsa runs de espacios/saltos en uno solo
+      chars.push(' '); map.push(i); enEspacio = true;
+    } else {
+      chars.push(c); map.push(i); enEspacio = false;
+    }
+  }
+  return { norm: chars.join('').toLowerCase(), map };
+}
+
 // Conserva SOLO las citas que existen literalmente en la transcripción (verificables).
 // Una cita que el LLM parafraseó o inventó se descarta: preferimos no resaltar a mentir.
 function buildSources(parsed, transcript) {
@@ -64,15 +91,18 @@ function buildSources(parsed, transcript) {
   const f = parsed && parsed._fuentes;
   const base = emptyFields();
   if (!f || typeof f !== 'object' || !transcript) return out;
-  const low = transcript.toLowerCase();
+  const { norm, map } = indexTranscript(transcript);
   for (const key of Object.keys(f)) {
     const [sec, field] = String(key).split('.');
     if (!base[sec] || !(field in base[sec])) continue;     // clave fuera del esquema → descarta
     const quote = String(f[key] || '').trim();
     if (quote.length < 4) continue;
-    const i = low.indexOf(quote.toLowerCase());
-    if (i === -1) continue;                                  // no es verbatim → descarta (fallback)
-    out[key] = transcript.slice(i, i + quote.length);        // substring real, con su acentuación original
+    const q = quote.replace(/\s+/g, ' ').toLowerCase();
+    const i = norm.indexOf(q);
+    if (i === -1) continue;                                // no está en el audio → descarta
+    const ini = map[i];
+    const fin = map[i + q.length - 1] + 1;                 // devolvemos el tramo REAL del transcript,
+    out[key] = transcript.slice(ini, fin);                 // con sus saltos y su acentuación originales
   }
   return out;
 }
@@ -122,8 +152,39 @@ function normalize(parsed, { patient, date, transcript } = {}) {
   return { fields: out, sources: buildSources(parsed, transcript) };
 }
 
+// Ventana de contexto. Un num_ctx fijo de 8192 desbordaba con una consulta de 25-30 min
+// (~2.500-3.500 palabras), y Ollama trunca DESCARTANDO TOKENS DEL INICIO: se come el
+// system con el esquema, o el principio del audio —que es donde están la filiación y el
+// motivo de consulta—. El resultado son campos vacíos, indistinguibles de "no se mencionó".
+//
+// Así que la medimos y la ajustamos. Y si de verdad no cabe, fallamos con un mensaje que
+// el médico entiende, en vez de devolver media historia clínica en silencio.
+const CTX_MIN = 8192;
+const CTX_MAX = Number(process.env.OLLAMA_NUM_CTX_MAX || 32768);   // qwen2.5 soporta 32k
+const CTX_RESERVE = 1500;              // system (~500) + JSON de salida (~600) + margen
+const CHARS_PER_TOKEN = 3.5;           // español, aproximación conservadora
+
+function estimateTokens(text) {
+  return Math.ceil(String(text || '').length / CHARS_PER_TOKEN);
+}
+
+// Ventana necesaria para esta transcripción, o un error si no hay ninguna que alcance.
+function contextFor(transcript) {
+  const needed = estimateTokens(transcript) + CTX_RESERVE;
+  if (needed > CTX_MAX) {
+    const err = new Error(
+      `La transcripción es demasiado larga para el modelo (~${needed} tokens, el máximo es ${CTX_MAX}). ` +
+      `No se autollenó nada para no darte una historia a medias: revísala con la transcripción al lado.`
+    );
+    err.code = 'TRANSCRIPT_TOO_LONG';
+    throw err;
+  }
+  return Math.min(CTX_MAX, Math.max(CTX_MIN, Math.ceil(needed * 1.15)));
+}
+
 // Extrae campos clínicos de una transcripción. Lanza si Ollama falla.
 async function extractFields(transcript, { patient, date } = {}) {
+  const num_ctx = contextFor(transcript);
   const body = {
     model: MODEL,
     stream: false,
@@ -131,7 +192,7 @@ async function extractFields(transcript, { patient, date } = {}) {
     // keep_alive: mantén el modelo cargado entre pacientes (evita recarga en frío
     // de ~5 s cada autollenado). No '-1' porque la Mac es de uso dual.
     keep_alive: process.env.OLLAMA_KEEP_ALIVE || '30m',
-    options: { temperature: 0.1, num_ctx: 8192 },
+    options: { temperature: 0.1, num_ctx },
     messages: [
       { role: 'system', content: SYSTEM },
       { role: 'user', content:
@@ -153,4 +214,4 @@ async function extractFields(transcript, { patient, date } = {}) {
   return normalize(parsed, { patient, date, transcript });
 }
 
-module.exports = { extractFields, available, emptyFields, normalize, MODEL };
+module.exports = { extractFields, available, emptyFields, normalize, MODEL, contextFor, estimateTokens, CTX_MAX };

@@ -89,8 +89,15 @@ export function AiBanner({ rec, emptyCount, onReextract, reextracting, pendingCo
     msg='Completando los campos con IA local…'; spin=true;
   } else if (rec.fieldsError) {
     bg='var(--warn-bg)'; bd='var(--warn-border)'; fg='var(--warn)';
-    msg='El autollenado falló. Transcripción disponible, revisa a mano o reintenta.';
-    action=<Btn variant="soft" size="sm" icon="refresh" onClick={onReextract}>Reintentar</Btn>;
+    // La CAUSA importa: "la transcripción es demasiado larga para el modelo" y "Ollama está
+    // caído" piden cosas distintas del médico. Antes ambas mostraban el mismo genérico, así
+    // que el mensaje que el backend se molestaba en construir moría sin que nadie lo leyera.
+    const larga = /demasiado larga/i.test(rec.fieldsError);
+    msg = larga
+      ? rec.fieldsError
+      : 'El autollenado falló. Transcripción disponible, revisa a mano o reintenta.';
+    // Reintentar no sirve de nada si el problema es el tamaño: va a fallar igual.
+    if (!larga) action=<Btn variant="soft" size="sm" icon="refresh" onClick={onReextract}>Reintentar</Btn>;
   } else if (rec.fields) {
     bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
     msg = pendingConfirm > 0
@@ -156,7 +163,7 @@ export function PrintDoc({ rec, vals, cfg, dict }) {
 }
 
 // ── ClinicalFields (Column B) ─────────────────────────────────────────────────
-export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete, onRetry, onReextract, onSign, onPrev, onNext, onDirty, queuePos, pendingCount }) {
+export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete, onRetry, onReextract, onSign, onPrev, onNext, onDirty, reviewPos, pendingCount }) {
   const sources = rec?.sources || {};
   // Aplica el diccionario médico al aplanar los campos (queda corregido al firmar).
   const flat = (f) => { const o = flattenFields(f); for (const k in o) o[k] = applyDict(o[k], dict); return o; };
@@ -248,7 +255,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
 
   const isReviewed = rec?.status === 'reviewed' || rec?.reviewed;
   const isError    = rec?.status === 'error';
-  const isProc     = ['received','processing','filling'].includes(rec?.status);
+  const isProc     = ['received','queued','processing','filling'].includes(rec?.status);
   const patientKey = 'filiacion.nombre';
   const patientName = vals[patientKey] || recName(rec);
 
@@ -284,18 +291,36 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
             {fmtDateTime(rec.createdAt)}{rec.durationSec ? ` · ${fmtDur(rec.durationSec)}` : ''}{rec.patient?.dni ? ` · DNI ${rec.patient.dni}` : ''}
           </div>
 
-          {isError ? (
-            <div style={{ textAlign:'center', padding:'48px 0' }}>
-              <div style={{ width:56,height:56,borderRadius:14,background:'var(--danger-bg)',color:'var(--danger)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 16px' }}>
-                <Icon name="warn" size={28}/>
+          {/* Whisper falló. El audio SIGUE guardado y es reproducible: el médico tiene que
+              poder llenar la historia a mano escuchándolo. Antes esta rama reemplazaba todo
+              el formulario por un muro y lo dejaba sin ninguna salida — justo el día malo. */}
+          {isError && (
+            <div style={{ display:'flex', gap:12, alignItems:'flex-start', padding:'14px 16px', marginBottom:24,
+                          background:'var(--danger-bg)', borderRadius:10 }}>
+              <div style={{ color:'var(--danger)', flexShrink:0, marginTop:1 }}><Icon name="warn" size={18}/></div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:14, fontWeight:660, marginBottom:3 }}>No se pudo transcribir el audio</div>
+                <div style={{ fontSize:13, color:'var(--muted)', lineHeight:1.5, marginBottom:10 }}>
+                  {rec.error||'Error durante la transcripción.'} Puedes reproducir el audio y llenar la historia a mano.
+                </div>
+                <Btn icon="refresh" onClick={()=>onRetry?.(rec)}>Reintentar transcripción</Btn>
               </div>
-              <div style={{ fontSize:17,fontWeight:720,marginBottom:8 }}>No se pudo procesar</div>
-              <div style={{ fontSize:13.5,color:'var(--muted)',lineHeight:1.5,marginBottom:20,maxWidth:400,margin:'0 auto 20px' }}>{rec.error||'Error durante la transcripción.'}</div>
-              <Btn icon="refresh" onClick={()=>onRetry?.(rec)}>Reintentar</Btn>
             </div>
-          ) : isProc ? (
+          )}
+
+          {isProc ? (
             <div style={{ textAlign:'center', padding:'48px 0' }}>
-              <Spinner size={28}/><div style={{ marginTop:16,fontSize:14,color:'var(--muted)' }}>Procesando grabación…</div>
+              <Spinner size={28}/>
+              <div style={{ marginTop:16,fontSize:14,color:'var(--muted)' }}>
+                {rec?.status==='queued' && rec?.queuePos > 0
+                  ? `En cola: ${rec.queuePos} por delante`
+                  : rec?.status==='filling' ? 'Llenando la historia…' : 'Transcribiendo…'}
+              </div>
+              {rec?.status==='queued' && (
+                <div style={{ marginTop:6, fontSize:12.5, color:'var(--faint)' }}>
+                  Se transcribe una consulta a la vez.
+                </div>
+              )}
             </div>
           ) : (<>
             {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract} reextracting={reextracting} pendingConfirm={pendingConfirm.length}/>}
@@ -329,9 +354,9 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
       <div style={{ height:60, borderTop:'1px solid var(--border-subtle)', padding:'0 28px',
         display:'flex', alignItems:'center', gap:8, flexShrink:0, background:'var(--surface)' }}>
 
-        <IconBtn name="chevL" onClick={onPrev} disabled={queuePos<=1} title="Anterior (K)"/>
+        <IconBtn name="chevL" onClick={onPrev} disabled={reviewPos<=1} title="Anterior (K)"/>
 
-        {!isError && !isProc && (
+        {!isProc && (
           <button type="button" onClick={()=>setOnlyEmpty(v=>!v)}
             style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'4px 10px', borderRadius:6,
               background:onlyEmpty?'var(--warn-bg)':'transparent',
@@ -351,7 +376,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
         {save==='error' && (
           <span style={{ fontSize:12.5, color:'var(--danger)', fontWeight:600 }}>No se pudo guardar</span>
         )}
-        {!isError && !isProc && (<>
+        {!isProc && (<>
           {dirty && (
             <Btn variant={saveVariant} size="sm" onClick={()=>doSave(false)} disabled={save==='saving'}>{saveLabel}</Btn>
           )}
@@ -364,7 +389,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
           }
         </>)}
 
-        <IconBtn name="chevR" onClick={onNext} disabled={queuePos>=pendingCount} title="Siguiente (J)"/>
+        <IconBtn name="chevR" onClick={onNext} disabled={reviewPos>=pendingCount} title="Siguiente (J)"/>
       </div>
     </div>
   );

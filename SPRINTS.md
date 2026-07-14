@@ -36,6 +36,11 @@ La lista que el Agente A verifica al cerrar **cada** sprint. Crece; nunca se pod
 16. **[S16]** Sin usuarios, sin token y sin `MEDRECORD_OPEN=1`, el server no arranca.
 17. **[S16]** Si NINGÚN sidecar descifra, el server aborta en vez de mandarlos a cuarentena.
 18. **[S16]** Actualizar el código nunca borra audio ya guardado.
+19. **[S17]** Nunca corre más de un Whisper a la vez, venga de donde venga el trabajo.
+20. **[S17]** Un trabajo en vuelo nunca escribe sobre una historia firmada o borrada.
+21. **[S17]** Una transcripción que no cabe en el contexto nunca produce campos vacíos en silencio.
+22. **[S17]** No se puede firmar una historia vacía (sin transcripción y sin ningún campo).
+23. **[S17]** El cliente no influye en el timeout de Whisper: la duración la mide el servidor.
 
 ---
 
@@ -133,3 +138,126 @@ maestra existente se regenera jamás.
 16. Sin usuarios, sin token y sin `MEDRECORD_OPEN=1`, el server no arranca.
 17. Si NINGÚN sidecar descifra, el server aborta en vez de mandarlos a cuarentena.
 18. Actualizar el código nunca borra audio ya guardado.
+
+## Sprint 17 — El pipeline aguanta un turno · CERRADO 2026-07-12
+
+**Goal:** Cinco audios subidos en tres minutos se procesan todos, sin matarse entre sí, y un
+audio de 30 minutos llega completo al LLM o falla con un mensaje que el médico entiende.
+
+**Veredicto: CUMPLIDO** (el Agente C lo verificó con Playwright sobre el bundle de producción
+y corriendo el pipeline real con Whisper large-v3 + Ollama, no contra el test).
+
+### Qué cambió
+
+- `server.js` — **cola FIFO con concurrencia 1**. Whisper carga 3 GB por proceso y corre con
+  todos los cores; dos a la vez mandan la Mac de 16 GB a swap y se matan entre sí en cascada.
+  `loadAll()` ya serializaba el resume con el comentario *"el resto del pipeline asume una a la
+  vez"* — pero el camino en vivo no lo asumía. Ahora el POST, el resume y el `/retry` pasan
+  todos por la misma cola. Estado `queued` + `queuePos` visible ("vas 3 de 5").
+- `whisper.js` — **timeout proporcional a la duración**, y la duración **la mide el servidor**
+  sobre el WAV que produce ffmpeg (PCM 16 kHz mono = 32.000 bytes/seg, sale de un `stat`). El
+  cliente no influye: un `durationSec` inflado reservaría el único slot de la cola por horas.
+- `llm.js` — **`num_ctx` dinámico**. El fijo de 8192 desbordaba con una consulta de 25-30 min, y
+  Ollama trunca **descartando tokens del inicio**: se comía la filiación y el motivo de consulta,
+  y `normalize()` rellenaba con `''`, indistinguible de "no se mencionó". Si de verdad no cabe,
+  `TRANSCRIPT_TOO_LONG` con un mensaje que el médico entiende.
+- `llm.js` — **las fuentes verbatim resucitaron** (ver abajo, lo encontró el benchmark).
+- `src/web/clinical.jsx` — si Whisper falla, el médico **ya puede llenar la historia a mano**
+  escuchando el audio: antes un muro de error reemplazaba todo el formulario y lo dejaba sin
+  salida, justo el día malo. El `AiBanner` ahora muestra la **causa** del fallo del LLM.
+- `src/web/app.jsx` — **chip de salud** con poll a `/health`. El endpoint existía desde el
+  sprint 1 y la web nunca lo llamaba: si Ollama caía a mitad de turno, el médico se enteraba
+  viendo fallar el autollenado doce veces seguidas.
+
+### Benchmark real (el número que era la promesa del producto y no existía)
+
+Consulta sintética de 2.66 min (diálogo clínico completo), pipeline real en la Mac:
+
+| Etapa | Tiempo |
+|---|---|
+| Whisper large-v3 | 32.1 s → **0.20× tiempo real** |
+| Ollama qwen2.5:7b | 38.2 s |
+| **Total** | **70 s** |
+
+Campos llenos 15/22, y extrajo bien lo que importa: PA `150/95`, FC `88`, diagnóstico
+(*"cefalea tensional, hipertensión arterial no diagnosticada"*), tratamiento con dosis
+(*"naproxeno 500 mg cada 12 horas por 5 días"*).
+
+**Extrapolado a una consulta de 20 minutos: ~4.7 minutos hasta el borrador.** Nadie ha corrido
+todavía los 20 minutos completos de punta a punta — es una extrapolación lineal sobre el ratio
+de Whisper, honesta pero no medida.
+
+### El bug que solo el benchmark podía encontrar
+
+Con la transcripción real, `buildSources()` devolvió **0 fuentes**. Cero. La evidencia vinculada
+—la feature que justifica que el médico confíe en la IA— estaba **muerta sobre audio real**, y
+ningún test lo veía porque todos usan transcripciones de una sola línea.
+
+Causa: whisper.cpp separa los segmentos con saltos de línea, el LLM cita las frases sin ellos, y
+el `indexOf` literal fallaba en cualquier cita que cruzara un salto. La invariante 12 ("las
+fuentes se validan verbatim") **seguía siendo cierta y era vacua**: no mostrábamos fuentes falsas
+porque no mostrábamos ninguna.
+
+Arreglado colapsando los espacios en blanco con un mapa de vuelta a los offsets originales. No
+relaja la garantía —la cita sigue teniendo que existir en el audio—, solo deja de exigir que
+coincidan los saltos de línea. Sobre el mismo audio: **de 0 a 6 fuentes**, y la cita inventada
+se sigue descartando.
+
+### Tests
+
+- `test/sprint17_turno.mjs` → **11/11**. El caso 1 no mira el resultado: sustituye whisper-cli
+  por un script que registra START/END y **verifica que sus ventanas de ejecución nunca se
+  solapen** (5 arranques, máximo 1 simultáneo). Sin eso, un test que solo mirara el estado final
+  pasaría igual aunque corrieran los 5 en paralelo.
+- Suite completa → **88/88, 0 fallas**.
+
+### QA (protocolo anticagadas)
+
+Los tres agentes encontraron **2 P0, 1 P1 y 1 P2 reales**, todos reproducidos ejecutando código.
+Todos corregidos dentro del sprint, y los dos agentes que hallaron P0 se relanzaron para
+verificar los fixes.
+
+- **Agente B (sabueso):** los dos P0 eran míos y los introdujo este mismo sprint.
+  - **P0:** al habilitar el footer en estado `error` para que el médico pudiera llenar a mano,
+    abrí la puerta a **firmar una historia completamente vacía**. El gate de human-in-the-loop
+    solo corre `if (r.fields_ia)`, y cuando Whisper falla no hay IA — así que el gate entero se
+    saltaba. Lo firmó en vivo con un solo PUT: historia sellada con HMAC, sin una palabra dentro.
+  - **P0:** la cola alargó de milisegundos a **minutos** la ventana en que un job en vuelo puede
+    aterrizar sobre una historia ya firmada, dejando el HMAC inválido sobre contenido que el
+    médico nunca vio. Lo reprodujo: `/verify` devolvía `valid:false` sobre una firma legítima, y
+    el registro reaparecía en "Por revisar". Fix: `jobVigente()`, que revalida después de cada
+    `await`. (Estaba planificado para el Sprint 19; la cola lo volvió urgente.)
+  - **P1:** el `durationSec` del cliente podía inflar el timeout y trabar el único slot 3 horas.
+  - En la **re-verificación** encontró que mi primer fix era **incompleto** (`medida || durationSec`
+    seguía cayendo al cliente si el WAV salía corrupto). Cerrado quitando el fallback entero.
+- **Agente C (verificador):** primer veredicto **"GOAL CUMPLIDO SOLO EN EL TEST"** — que según las
+  reglas cuenta como P0 y bloquea el cierre. Dos grietas: (a) con `durationSec=0` el timeout caía
+  al tope fijo de 20 min, *el bug que el sprint decía arreglar*; y (b) **el mensaje de
+  `TRANSCRIPT_TOO_LONG` nunca llegaba a la pantalla** — lo construí con cuidado en el backend y el
+  `AiBanner` lo tiraba a la basura, mostrando el mismo genérico que para cualquier otro fallo.
+  Tras los fixes: **GOAL CUMPLIDO**, verificado con Playwright leyendo el DOM del bundle de
+  producción.
+- **Agente A (regresión):** 18/18 invariantes intactas. Señaló el mismo riesgo de la carrera de
+  firma que el sabueso, por otro camino.
+
+### Deuda abierta
+
+- **Nadie ha corrido una consulta real de 20-30 minutos de punta a punta.** El número del
+  benchmark es una extrapolación. → Antes del piloto.
+- **Los tests usan puertos fijos**: dos suites solapadas colisionan (`TIME_WAIT`). Va a morder en
+  CI. → **Sprint 22.**
+- **Ningún test ejercita Whisper real**: los fakes siempre tienen éxito en 700 ms. No se cubren el
+  timeout con `SIGKILL`, el exit code ≠ 0, ni el `.txt` ausente. → **Sprint 22.**
+- **Firmar solo con transcripción y sin campos** queda bloqueado por el gate nuevo. Creo que es lo
+  correcto (una historia clínica sin campos estructurados no es una historia), pero es una
+  decisión de producto que conviene confirmar con el médico del piloto.
+- La deuda del Sprint 16 (CSRF, WS que congela la identidad, timing attack en login, HMAC sin
+  no-repudio) sigue abierta. → **Sprint 19.**
+
+### Invariantes nuevas para el Agente A
+
+19. Nunca corre más de un Whisper a la vez, venga de donde venga el trabajo.
+20. Un trabajo en vuelo nunca escribe sobre una historia firmada o borrada.
+21. Una transcripción que no cabe en el contexto nunca produce campos vacíos en silencio.
+22. No se puede firmar una historia vacía (sin transcripción y sin ningún campo).
+23. El cliente no influye en el timeout de Whisper: la duración la mide el servidor.

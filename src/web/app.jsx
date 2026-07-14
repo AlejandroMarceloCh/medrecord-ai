@@ -74,7 +74,48 @@ function AllDoneScreen({ reviewedCount, processingCount, pastPendingCount, onHis
 }
 
 // ── AppHeader ─────────────────────────────────────────────────────────────────
-function AppHeader({ cfg, view, onViewChange, wsStatus, onRefresh }) {
+// Salud del pipeline. /health existía desde el sprint 1 y la web NUNCA lo llamaba: si
+// Ollama se caía a mitad de turno, el médico se enteraba historia por historia, viendo
+// fallar el autollenado doce veces. Un chip y se acabó.
+function useHealth() {
+  const [health, setHealth] = useState(null);
+  useEffect(() => {
+    let vivo = true;
+    const check = async () => {
+      try {
+        const r = await apiFetch('/health');
+        if (vivo) setHealth(r.ok ? await r.json() : null);
+      } catch { if (vivo) setHealth(null); }
+    };
+    check();
+    const t = setInterval(check, 60000);
+    return () => { vivo = false; clearInterval(t); };
+  }, []);
+  return health;
+}
+
+function HealthChip({ health }) {
+  if (!health) return null;
+  const caidos = [];
+  if (!health.whisper) caidos.push('transcripción');
+  if (!health.llm)     caidos.push('autollenado');
+  if (!caidos.length) return null;
+
+  const soloLlm = caidos.length === 1 && !health.llm;
+  return (
+    <div title={soloLlm
+        ? 'Las consultas se transcriben, pero los campos no se llenan solos. Puedes escribirlos con la transcripción al lado.'
+        : 'Revisa que Whisper y Ollama estén corriendo en el servidor.'}
+      style={{ display:'flex', alignItems:'center', gap:6, padding:'4px 10px', borderRadius:6,
+        background:'var(--warn-bg)', border:'1px solid var(--warn-border)', color:'var(--warn)',
+        fontSize:12, fontWeight:600, whiteSpace:'nowrap' }}>
+      <Icon name="warn" size={13}/>
+      {soloLlm ? 'Autollenado caído' : `Sin ${caidos.join(' ni ')}`}
+    </div>
+  );
+}
+
+function AppHeader({ cfg, view, onViewChange, wsStatus, onRefresh, health }) {
   const initials = cfg.doctorName
     ? cfg.doctorName.replace(/^(Dr|Dra)\.?\s*/i,'').split(' ').filter(Boolean).map(w=>w[0]).slice(0,2).join('').toUpperCase()
     : 'MR';
@@ -111,6 +152,7 @@ function AppHeader({ cfg, view, onViewChange, wsStatus, onRefresh }) {
       </div>
       <div style={{ flex:1 }}/>
 
+      <HealthChip health={health}/>
       <WsChip status={wsStatus} onClick={onRefresh}/>
 
       {/* Identidad: clickeable hacia Ajustes */}
@@ -199,6 +241,7 @@ function WorkbenchBar({ rec, reviewedCount, onBack, queuePos, queueLen }) {
 
 // ── WebRoot ───────────────────────────────────────────────────────────────────
 export function WebRoot() {
+  const health = useHealth();
   const [cfg,        setCfg]        = useState(loadConfig);
   const [dict,       setDict]       = useState(loadDict);
   const [view,       setView]       = useState('listing');
@@ -369,7 +412,7 @@ export function WebRoot() {
   return (
     <div style={{ display:'flex', flexDirection:'column', height:'100vh', overflow:'hidden', background:'var(--bg)' }}>
       <AppHeader cfg={cfg} view={view} onViewChange={handleViewChange}
-        wsStatus={wsStatus} onRefresh={()=>refetch.current()}/>
+        wsStatus={wsStatus} onRefresh={()=>refetch.current()} health={health}/>
 
       {view==='settings' ? (
         <SettingsView cfg={cfg} setCfg={handleCfg} dict={dict} setDict={handleDict}/>
@@ -377,14 +420,14 @@ export function WebRoot() {
       ) : view==='workbench' && liveRec ? (
         <div style={{ display:'flex', flexDirection:'column', flex:1, overflow:'hidden' }}>
           <WorkbenchBar rec={liveRec} reviewedCount={reviewedCount} onBack={onBack}
-            queuePos={queuePos} queueLen={activeQueue.length}/>
+            reviewPos={queuePos} queueLen={activeQueue.length}/>
           <div style={{ display:'flex', flex:1, overflow:'hidden' }}>
             <ClinicalFields
               rec={liveRec} cfg={cfg} dict={dict} onHoverField={setHovFieldId}
               onSaved={upsert} onDelete={handleDelete} onRetry={handleRetry}
               onSign={onSign} onPrev={onPrev} onNext={onNext}
               onDirty={(d)=>{ dirtyRef.current = d; }}
-              queuePos={queuePos} pendingCount={activeQueue.length}/>
+              reviewPos={queuePos} pendingCount={activeQueue.length}/>
             <TranscriptPanel rec={liveRec} dict={dict} hovFieldId={hovFieldId}/>
           </div>
         </div>

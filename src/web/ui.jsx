@@ -87,6 +87,7 @@ export function Spinner({ size=16, color='var(--accent)' }) {
 // StatusChip con bg+border por estado — usado en la barra del workbench
 const SC = {
   received:   { label:'Recibido',           c:'var(--faint)',         bg:'var(--surface-2)', b:'var(--border-mid)',  spin:true  },
+  queued:     { label:'En cola',            c:'var(--faint)',         bg:'var(--surface-2)', b:'var(--border-mid)',  spin:true  },
   processing: { label:'Transcribiendo',     c:'var(--accent-strong)', bg:'var(--accent-soft)',b:'var(--accent-line)', spin:true  },
   filling:    { label:'Completando campos', c:'var(--accent-strong)', bg:'var(--accent-soft)',b:'var(--accent-line)', spin:true  },
   done:       { label:'Por revisar',        c:'var(--warn)',          bg:'var(--warn-bg)',   b:'var(--warn-border)', spin:false },
