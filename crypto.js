@@ -49,7 +49,13 @@ function loadOrCreateKey() {
   return key;
 }
 
-const KEY = loadOrCreateKey();
+const MASTER = loadOrCreateKey();
+
+// Subclaves separadas por dominio. Antes la MISMA clave cifraba y firmaba (HMAC): una fuga
+// por un lado comprometía el otro. HKDF las deriva de la maestra sin que ninguna revele la
+// otra, y no rompe nada existente porque el cifrado sigue usando la misma clave que antes.
+const KEY = MASTER;                                              // AES-256-GCM (compatibilidad)
+const MAC_KEY = crypto.hkdfSync('sha256', MASTER, Buffer.alloc(0), 'medrecord-mac-v1', 32);
 
 // Formato del blob: [12 bytes IV][16 bytes auth tag][ciphertext]
 function encryptBuffer(buf) {
@@ -95,12 +101,61 @@ function isEncrypted(srcPath) {
   catch { return false; }
 }
 
-// Firma de integridad (HMAC-SHA256 con la clave maestra). Es un PUENTE de
-// tamper-evidence verificable, NO una firma digital RENIECE legalmente vinculante
-// (eso requiere certificados de RENIECE, fuera del alcance del código).
-function hmac(data) {
+// Firma de integridad (HMAC-SHA256). Es tamper-evidence, NO una firma legalmente
+// vinculante: para eso está la firma Ed25519 del médico, más abajo.
+//
+// OJO con la clave: las firmas v1 se calcularon con la clave MAESTRA. Cambiarles la clave
+// las invalidaría TODAS de golpe —una historia legítima pasaría a reportarse como
+// adulterada—, así que la v1 conserva la suya. La separación de dominios (MAC_KEY derivada
+// por HKDF) se aplica solo a las firmas nuevas.
+function hmac(data, version = 1) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
-  return crypto.createHmac('sha256', KEY).update(buf).digest('hex');
+  const clave = version >= 2 ? Buffer.from(MAC_KEY) : KEY;
+  return crypto.createHmac('sha256', clave).update(buf).digest('hex');
+}
+
+// ── Firma del médico (Ed25519) ───────────────────────────────────────────────
+// El HMAC prueba que el contenido no cambió, pero NO da no-repudio: la clave la conoce el
+// servidor, así que un admin podría forjar la firma de cualquier médico. Y TERMS.md promete
+// justo lo contrario — que la responsabilidad del contenido recae en quien firma.
+//
+// Cada médico tiene su par Ed25519. La privada se guarda cifrada con una clave derivada de
+// SU contraseña: el servidor no puede firmar por él sin que él inicie sesión.
+function generarParDeClaves() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  return {
+    publicKey: publicKey.export({ type: 'spki', format: 'pem' }),
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  };
+}
+
+// Cifra/descifra la clave privada con la contraseña del médico (scrypt → AES-256-GCM).
+function cifrarConPassword(texto, password, salt) {
+  const k = crypto.scryptSync(String(password), salt, 32);
+  const iv = crypto.randomBytes(IV_LEN);
+  const c = crypto.createCipheriv(ALGO, k, iv);
+  const enc = Buffer.concat([c.update(Buffer.from(texto, 'utf8')), c.final()]);
+  return Buffer.concat([iv, c.getAuthTag(), enc]).toString('base64');
+}
+function descifrarConPassword(b64, password, salt) {
+  const blob = Buffer.from(b64, 'base64');
+  const k = crypto.scryptSync(String(password), salt, 32);
+  const iv = blob.subarray(0, IV_LEN);
+  const tag = blob.subarray(IV_LEN, IV_LEN + TAG_LEN);
+  const d = crypto.createDecipheriv(ALGO, k, iv);
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(blob.subarray(IV_LEN + TAG_LEN)), d.final()]).toString('utf8');
+}
+
+function firmarEd25519(payload, privateKeyPem) {
+  const key = crypto.createPrivateKey(privateKeyPem);
+  return crypto.sign(null, Buffer.from(payload, 'utf8'), key).toString('base64');
+}
+function verificarEd25519(payload, firmaB64, publicKeyPem) {
+  try {
+    const key = crypto.createPublicKey(publicKeyPem);
+    return crypto.verify(null, Buffer.from(payload, 'utf8'), key, Buffer.from(firmaB64, 'base64'));
+  } catch { return false; }
 }
 
 // Borrado seguro: sobrescribe el archivo con bytes aleatorios (+fsync) antes de
@@ -118,4 +173,7 @@ function secureDelete(filePath) {
   } catch { try { fs.unlinkSync(filePath); } catch { /* noop */ } return false; }
 }
 
-module.exports = { encryptBuffer, decryptBuffer, writeEncrypted, readEncrypted, isEncrypted, keyPath, hmac, secureDelete };
+module.exports = {
+  encryptBuffer, decryptBuffer, writeEncrypted, readEncrypted, isEncrypted, keyPath, hmac, secureDelete,
+  generarParDeClaves, cifrarConPassword, descifrarConPassword, firmarEd25519, verificarEd25519,
+};

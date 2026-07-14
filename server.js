@@ -20,13 +20,15 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const { transcribe, checkEnv } = require('./whisper');
+const { transcribe, checkEnv, MODEL: whisperModel } = require('./whisper');
 const llm = require('./llm');
 const enc = require('./crypto');
 const auth = require('./auth');
 
 // Error de arranque: el sistema se niega a hacer algo destructivo. No es un bug.
 function bootError(msg) { const e = new Error(msg); e.code = 'MEDRECORD_BOOT'; return e; }
+
+const APP_VERSION = require('./package.json').version;
 
 // Para logs: nunca imprimas el id completo ni PII, solo un prefijo no identificable.
 const shortId = (id) => String(id || '').slice(0, 8);
@@ -56,6 +58,12 @@ const recordings = new Map(); // id → rec
 
 function metaPath(id) { return path.join(DATA_DIR, id + '.json'); }
 
+// Persiste el sidecar. LANZA si no pudo escribir.
+//
+// Antes se tragaba el error: con el disco lleno o sin permisos, el PUT respondía 200 con la
+// firma incluida, la UI decía "firmado", y al reiniciar loadAll() leía el sidecar viejo — la
+// firma y las ediciones del médico desaparecían sin un solo aviso. Un guardado que falla
+// tiene que fallar a la vista.
 function persist(rec) {
   if (!recordings.has(rec.id)) return;
   const dest = metaPath(rec.id);
@@ -64,7 +72,29 @@ function persist(rec) {
   } catch (err) {
     console.error('No se pudo persistir', shortId(rec.id), err.message);
     try { fs.unlinkSync(dest + '.tmp'); } catch {}
+    const e = new Error('no se pudo guardar en disco');
+    e.code = 'PERSIST_FAILED';
+    throw e;
   }
+}
+
+// Para los caminos donde un fallo de escritura no debe tumbar el proceso (broadcasts de
+// estado del pipeline): registra y sigue, pero deja marcado el registro.
+function persistSoft(rec) {
+  try { persist(rec); return true; }
+  catch { rec.persistError = true; return false; }
+}
+
+// Procedencia: qué produjo esta historia. Sin esto, con firma inmutable, no hay forma de
+// explicar por qué una consulta de marzo se ve distinta de una de mayo — y esa es la
+// primera pregunta de cualquier auditoría.
+function provenance() {
+  return {
+    whisper_model: path.basename(whisperModel || ''),
+    llm_model: llm.MODEL,
+    prompt_hash: llm.PROMPT_HASH,
+    app_version: APP_VERSION,
+  };
 }
 
 // Descifra el audio a un archivo temporal para pasarlo a ffmpeg/whisper y lo borra
@@ -136,7 +166,7 @@ function loadAll() {
       } else {
         rec.status = 'error';
         rec.error = 'Se perdió el audio al reiniciar el servidor.';
-        persist(rec);
+        persistSoft(rec);   // un fallo de disco no puede impedir que el server arranque
       }
     }
   }
@@ -169,7 +199,9 @@ function purgeExpiredAudio() {
     if (rec.audioFile && !rec.audioDeleted && rec.reviewed && (rec.reviewedAt || rec.createdAt) < cutoff) {
       enc.secureDelete(path.join(DATA_DIR, rec.audioFile));
       rec.audioDeleted = true; rec.audioFile = null;
-      persist(rec);
+      // persistSoft, no persist: esto corre cada hora en segundo plano. Un throw aquí
+      // tumbaría el servidor completo —matando el turno del médico— por un disco lleno.
+      persistSoft(rec);
       auth.audit({ action: 'audio-purged', rec: rec.id });
       purged++;
     }
@@ -180,6 +212,11 @@ function purgeExpiredAudio() {
 
 const app = express();
 app.disable('x-powered-by');
+// Detrás de un túnel (cloudflared) o un proxy, la petición llega por http pero el navegador
+// la hizo por https. Sin esto, `req.protocol` dice 'http', el Origin comparado no coincide
+// con el real, y la validación de CSRF bloquea el login legítimo: el deploy que el propio
+// DEPLOY.md recomienda dejaría de funcionar sin que nadie entienda por qué.
+app.set('trust proxy', true);
 app.use(compression());
 app.use(express.json({ limit: '2mb' }));
 
@@ -212,6 +249,35 @@ const cookieSecure = PROD;
 // configurar un admin dejaba /api y el WebSocket sirviendo historias completas a
 // cualquiera que alcanzara el puerto — que es exactamente lo que pasa detrás de un túnel.
 const OPEN_MODE = process.env.MEDRECORD_OPEN === '1';
+
+// ── CSRF: validación de Origin ───────────────────────────────────────────────
+// La única defensa era `SameSite=Strict`, y "same-site" se calcula sobre el host
+// registrable: IGNORA EL PUERTO. Cualquier otro servidor en la misma máquina (un Vite en
+// :5173, otro proyecto en :8000) cuenta como same-site y su JavaScript podía firmar
+// historias con la cookie del médico, o abrir un WebSocket y llevarse el stream de PII.
+//
+// Por eso el Origin se compara completo (esquema + host + puerto). Las peticiones sin
+// Origin (curl, el propio móvil en algunos casos) se dejan pasar: no vienen de un
+// navegador, así que no llevan la cookie de nadie por sorpresa.
+const ORIGINS_OK = (process.env.MEDRECORD_ORIGINS || '')
+  .split(',').map(o => o.trim()).filter(Boolean);
+
+function origenPermitido(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;                       // no es una petición de navegador
+  if (ORIGINS_OK.includes(origin)) return true;   // allowlist explícita (túnel, dominio propio)
+  // Mismo origen que el host al que llegó la petición: es la app hablando consigo misma.
+  const esperado = `${req.protocol}://${req.headers.host}`;
+  return origin === esperado;
+}
+
+const MUTANTES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+app.use('/api', (req, res, next) => {
+  if (!MUTANTES.has(req.method)) return next();
+  if (origenPermitido(req)) return next();
+  auth.audit({ action: 'denied', what: 'csrf', user: req.identity?.id || null });
+  res.status(403).json({ error: 'origen no permitido' });
+});
 
 // Resuelve req.identity en cada request a /api.
 app.use('/api', (req, _res, next) => {
@@ -250,7 +316,9 @@ app.post('/api/login', (req, res) => {
     return res.status(401).json({ error: 'credenciales inválidas' });
   }
   loginFails.delete(key);   // reset al autenticar bien
-  const token = auth.createSession(u.id);
+  // Desbloquea la clave de firma del médico con su contraseña. Solo vive en esta sesión.
+  const privada = auth.unlockPrivateKey(u, password);
+  const token = auth.createSession(u.id, privada);
   res.setHeader('Set-Cookie', auth.sessionCookie(token, { secure: cookieSecure }));
   auth.audit({ action: 'login', user: u.id });
   res.json({ user: auth.publicUser(u) });
@@ -258,6 +326,7 @@ app.post('/api/login', (req, res) => {
 
 app.post('/api/logout', (req, res) => {
   const cookies = auth.parseCookies(req);
+  auth.audit({ action: 'logout', user: req.identity?.id || null });
   auth.destroySession(cookies[auth.COOKIE]);
   res.setHeader('Set-Cookie', auth.clearCookie());
   res.json({ ok: true });
@@ -301,6 +370,18 @@ function requireAdmin(req, res, next) {
   res.status(403).json({ error: 'solo admin' });
 }
 app.get('/api/users', requireAdmin, (_req, res) => res.json(auth.listUsers()));
+
+// Registro de auditoría (solo admin). `readAudit` existía desde el sprint 9 y NADIE podía
+// llamarlo: un log que no se puede leer no es evidencia, es un archivo.
+app.get('/api/audit', requireAdmin, (req, res) => {
+  const limite = Math.min(Number(req.query.limit) || 200, 1000);
+  const filas = auth.readAudit();
+  res.json({
+    integridad: auth.verifyAudit(),          // ¿alguien editó el log?
+    total: filas.length,
+    entradas: filas.slice(-limite),
+  });
+});
 app.post('/api/users', requireAdmin, (req, res) => {
   try {
     const u = auth.createUser(req.body || {});
@@ -350,7 +431,15 @@ app.post('/api/recordings', upload.single('audio'), (req, res) => {
     updatedAt: Date.now(),
   };
   recordings.set(id, rec);
-  persist(rec);
+  try {
+    persist(rec);
+  } catch {
+    // Sin sidecar la grabación no sobrevive a un reinicio: mejor rechazarla ahora, con el
+    // médico delante, que dejar un fantasma que se evapora al reiniciar.
+    recordings.delete(id);
+    try { enc.secureDelete(path.join(DATA_DIR, audioFile)); } catch { /* noop */ }
+    return res.status(500).json({ error: 'no se pudo guardar la consulta en disco' });
+  }
   auth.audit({ action: 'create', user: req.identity?.id || null, rec: id });
   res.json({ id, status: rec.status });
 
@@ -420,7 +509,7 @@ function setStatus(rec, status, evt) {
   if (!recordings.has(rec.id)) return;
   rec.status = status;
   rec.updatedAt = Date.now();
-  persist(rec);
+  persistSoft(rec);
   broadcastRec(evt || ('recording:' + status), rec);
 }
 
@@ -474,6 +563,7 @@ async function processRecording(rec) {
     fieldsErr = String(err.message || err);
   }
   if (!jobVigente(rec)) return;      // se firmó/borró mientras el LLM corría
+  rec.provenance = provenance();     // qué Whisper, qué LLM y qué prompt produjeron esto
   if (ex) {
     rec.fields = ex.fields;
     rec.sources = ex.sources;
@@ -517,15 +607,49 @@ function publicRec(r) {
     signature: r.signature || null, consent: r.consent || null, audioDeleted: !!r.audioDeleted,
     ownerId: r.ownerId || null, version: r.version || 0,
     queuePos: r.queuePos || 0,   // "vas 3 de 5" mientras espera su turno de Whisper
+    provenance: r.provenance || null,   // qué modelos y qué prompt produjeron esta historia
     createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
 }
 
 // Contenido canónico que firma el médico. La firma sella este snapshot exacto.
-function signaturePayload(r, signedBy) {
+// Payload firmado, versión 2.
+//
+// La v1 sellaba solo id/patient/fields/transcript/reviewedAt/signedBy. Quedaban FUERA del
+// sello justo las tres cosas que hay que probar en una auditoría:
+//
+//   consent    — la base legal de todo el procesamiento (Ley 29733). Sin ella en la firma,
+//                cualquiera con acceso al sidecar podía poner granted:true y /verify seguía
+//                diciendo que la historia era íntegra.
+//   confirmed  — qué campos de IA atestó el médico. Es la prueba del human-in-the-loop.
+//   fields_ia  — qué generó la máquina. Sin esto no se puede demostrar qué escribió el
+//                médico y qué escribió el modelo, que es LA pregunta de una disputa.
+//
+// También entra la procedencia (qué Whisper, qué LLM, qué prompt), porque una historia
+// firmada en marzo y otra en mayo pueden diferir solo porque cambió el prompt.
+const SIG_VERSION = 2;
+
+function signaturePayload(r, signedBy, version = SIG_VERSION) {
+  if (version === 1) {
+    // Las historias firmadas antes de este cambio se verifican con su esquema original.
+    return JSON.stringify({
+      id: r.id, patient: r.patient, fields: r.fields || null,
+      transcript: r.transcript || null, reviewedAt: r.reviewedAt, signedBy: signedBy || null,
+    });
+  }
   return JSON.stringify({
-    id: r.id, patient: r.patient, fields: r.fields || null,
-    transcript: r.transcript || null, reviewedAt: r.reviewedAt, signedBy: signedBy || null,
+    v: 2,
+    id: r.id,
+    patient: r.patient,
+    fields: r.fields || null,
+    fields_ia: r.fields_ia || null,
+    confirmed: [...(r.confirmed || [])].sort(),   // orden estable: el mismo contenido, la misma firma
+    consent: r.consent || null,
+    transcript: r.transcript || null,
+    provenance: r.provenance || null,
+    createdAt: r.createdAt,
+    reviewedAt: r.reviewedAt,
+    signedBy: signedBy || null,
   });
 }
 
@@ -564,6 +688,9 @@ app.get('/api/recordings', (req, res) => {
 app.get('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r) return res.status(404).json({ error: 'no existe' });
+  if (!canSee(req.identity, r) && req.identity?.kind !== 'device') {
+    auth.audit({ action: 'denied', what: 'read', user: req.identity?.id || null, rec: r.id });
+  }
   // El device (móvil) puede consultar SOLO el estado de lo que sube, sin PII.
   if (req.identity && req.identity.kind === 'device') {
     return res.json({ id: r.id, status: r.status, error: r.error || null });
@@ -576,15 +703,37 @@ app.get('/api/recordings/:id/verify', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   if (!r.signature) return res.json({ signed: false, valid: false });
-  const expected = enc.hmac(signaturePayload(r, r.signature.signedBy));
+  const v = r.signature.v || 1;   // sin `v` es una firma vieja (esquema 1)
+  const payload = signaturePayload(r, r.signature.signedBy, v);
+  const expected = enc.hmac(payload, v);
+
+  // Autoría: ¿la firmó de verdad ESE médico? El HMAC no lo prueba (el servidor conoce la
+  // clave); la firma Ed25519 sí, porque su privada solo se descifra con su contraseña.
+  let autoria = null;
+  if (r.signature.sig && r.signature.signedBy) {
+    const pub = auth.publicKeyOf(r.signature.signedBy);
+    autoria = pub ? enc.verificarEd25519(payload, r.signature.sig, pub) : null;
+  }
+
+  auth.audit({ action: 'verify', user: req.identity?.id || null, rec: r.id });
   res.json({
-    signed: true, valid: expected === r.signature.hash,
+    signed: true, valid: expected === r.signature.hash, v,
+    autoriaVerificada: autoria,   // true = la firmó ese médico · null = firma sin autoría
     alg: r.signature.alg, signedAt: r.signature.signedAt, signedBy: r.signature.signedBy,
+    // Qué cubre la firma: para una auditoría, saber qué NO está sellado importa tanto
+    // como el hash. Una firma v1 no prueba el consentimiento ni la traza de la IA.
+    cubre: v >= 2
+      ? ['contenido', 'consentimiento', 'campos confirmados', 'salida de la IA', 'procedencia']
+      : ['contenido'],
   });
 });
 app.get('/api/recordings/:id/audio', (req, res) => {
   const r = recordings.get(req.params.id);
-  if (!r || !r.audioFile || !canSee(req.identity, r)) return res.sendStatus(404);
+  if (!r || !r.audioFile || !canSee(req.identity, r)) {
+    if (r) auth.audit({ action: 'denied', what: 'audio', user: req.identity?.id || null, rec: r.id });
+    return res.sendStatus(404);
+  }
+  auth.audit({ action: 'read-audio', user: req.identity?.id || null, rec: r.id });
   const fp = path.join(DATA_DIR, r.audioFile);
   if (!r.audioEnc) return res.sendFile(fp);   // legacy en claro
   try {
@@ -638,6 +787,13 @@ app.put('/api/recordings/:id/fields', (req, res) => {
     }
   }
 
+  // Copia del estado antes de tocar nada: si el disco falla, hay que dejar la RAM como estaba.
+  const previo = {
+    fields: r.fields, confirmed: r.confirmed, patient: r.patient, reviewed: r.reviewed,
+    reviewedAt: r.reviewedAt, signature: r.signature, version: r.version,
+    updatedAt: r.updatedAt, status: r.status,
+  };
+
   if (fields && typeof fields === 'object') r.fields = coerceFields(fields);
   if (confirmed) r.confirmed = confirmed;   // qué confirmó el médico (trazabilidad)
   if (req.body && req.body.patient && typeof req.body.patient === 'object') {
@@ -646,13 +802,43 @@ app.put('/api/recordings/:id/fields', (req, res) => {
   if (wantReview) {
     r.reviewed = true; r.reviewedAt = Date.now();
     // Firma de integridad: sella el contenido firmado (tamper-evidence verificable).
+    // `v` queda dentro de la firma para que /verify sepa con qué esquema recomputar: las
+    // historias firmadas con la v1 se siguen validando con la v1, no se invalidan solas.
     const signedBy = req.identity?.id || null;
-    r.signature = { alg: 'HMAC-SHA256', hash: enc.hmac(signaturePayload(r, signedBy)), signedAt: r.reviewedAt, signedBy };
+    const payload = signaturePayload(r, signedBy, SIG_VERSION);
+    r.signature = {
+      alg: 'HMAC-SHA256', v: SIG_VERSION,
+      hash: enc.hmac(payload, SIG_VERSION),          // integridad: ¿cambió el contenido?
+      signedAt: r.reviewedAt, signedBy,
+    };
+    // Firma del médico con SU clave. El HMAC lo puede recalcular el servidor; esto no.
+    // Es lo que permite sostener lo que promete TERMS.md: que el contenido es suyo.
+    const privada = auth.sessionPrivateKey(auth.parseCookies(req)[auth.COOKIE]);
+    if (privada) {
+      r.signature.sig = enc.firmarEd25519(payload, privada);
+      r.signature.sigAlg = 'Ed25519';
+    }
   }
   r.version = (r.version || 0) + 1;            // avanza la versión en cada escritura
   r.updatedAt = Date.now();
-  auth.audit({ action: wantReview ? 'sign' : 'edit', user: req.identity?.id || null, rec: r.id, version: r.version });
-  setStatus(r, wantReview ? 'reviewed' : r.status, 'recording:updated');
+
+  // El disco manda. Si la firma no llegó al sidecar, NO existe: responder 200 aquí dejaba
+  // a la UI diciendo "firmado" con una firma que vivía solo en RAM, y al reiniciar el
+  // servidor desaparecía junto con las ediciones del médico.
+  try {
+    persist(r);
+  } catch (err) {
+    Object.assign(r, previo);                  // deshacer el cambio en RAM
+    console.error('PUT /fields no pudo persistir', shortId(r.id), err.message);
+    return res.status(500).json({ error: 'no se pudo guardar en disco: no se firmó nada' });
+  }
+
+  auth.audit({
+    action: wantReview ? 'sign' : 'edit', user: req.identity?.id || null, rec: r.id,
+    version: r.version, hash: wantReview ? r.signature?.hash : undefined,
+  });
+  if (wantReview) r.status = 'reviewed';
+  broadcastRec('recording:updated', r);
   res.json(publicRec(r));
 });
 
@@ -680,17 +866,31 @@ app.post('/api/recordings/:id/reextract', async (req, res) => {
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
   if (r.reviewed) return res.status(409).json({ error: 'la consulta ya está firmada' });
   if (!r.transcript) return res.status(409).json({ error: 'no hay transcripción' });
+  // Reextraer DESTRUYE los campos y las confirmaciones: avanza la versión, o una web que
+  // tenía el registro abierto pasa el optimistic lock y sobrescribe con datos que ya no existen.
+  r.version = (r.version || 0) + 1;
+  auth.audit({ action: 'reextract', user: req.identity?.id || null, rec: r.id, version: r.version });
   res.json({ ok: true });
   setStatus(r, 'filling', 'recording:filling');
+
+  let ex = null, err = null;
   try {
-    const ex = await llm.extractFields(r.transcript, { patient: r.patient, date: r.createdAt });
+    ex = await llm.extractFields(r.transcript, { patient: r.patient, date: r.createdAt });
+  } catch (e) {
+    err = String(e.message || e);
+  }
+  // Igual que el pipeline: el LLM tarda, y en ese lapso el médico pudo firmar o borrar.
+  // Sin esta guarda, la salida cruda de la IA pisaba una historia ya firmada.
+  if (!jobVigente(r)) return;
+  if (ex) {
     r.fields = ex.fields;
     r.sources = ex.sources;
     r.fields_ia = deepCopy(ex.fields);   // nuevo snapshot de IA → reinicia confirmaciones
     r.confirmed = [];
     r.fieldsError = null;
-  } catch (err) {
-    r.fieldsError = String(err.message || err);
+    r.provenance = provenance();
+  } else {
+    r.fieldsError = err;
   }
   setStatus(r, 'done', 'recording:filled');
 });
@@ -699,6 +899,20 @@ app.post('/api/recordings/:id/reextract', async (req, res) => {
 app.delete('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r || !canSee(req.identity, r)) return res.status(404).json({ error: 'no existe' });
+
+  // Una historia FIRMADA no se borra. Tiene valor legal y el establecimiento es su custodio;
+  // además el borrado aquí es seguro (sobrescribe antes de desenlazar), o sea irrecuperable.
+  //
+  // Y es peor que una alteración: una historia adulterada la detecta /verify, pero una
+  // historia destruida no deja nada que verificar. Borrar un borrador sin firmar sí es
+  // legítimo (el paciente retira el consentimiento, se grabó al paciente equivocado).
+  if (r.reviewed) {
+    auth.audit({ action: 'denied', what: 'delete-signed', user: req.identity?.id || null, rec: r.id });
+    return res.status(409).json({
+      error: 'una historia firmada no se puede borrar: tiene valor legal y el establecimiento es su custodio',
+    });
+  }
+
   recordings.delete(r.id);
   // Borrado SEGURO (sobrescribe antes de desenlazar), igual que la purga por retención:
   // este es el camino por el que el paciente ejerce su derecho de supresión. Un rmSync
@@ -736,19 +950,35 @@ app.get('/mobile', sendPage('mobile.html'));
 
 // ── WebSocket (push de triggers a la web) ──
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+// maxPayload: el default de `ws` son 100 MiB por frame. Nadie nos manda nada por este
+// canal (es push del servidor al cliente), así que 64 KB sobra y corta el DoS trivial.
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 });
 const clients = new Set();
+const MAX_WS_CLIENTS = Number(process.env.MEDRECORD_MAX_WS || 50);
 
 // Identidad del WS desde el handshake: cookie de sesión (web) o ?token= (móvil).
 // El navegador no puede mandar headers en el WS, por eso el móvil usa query param.
-function wsIdentity(req) {
+// El WS guarda el TOKEN de sesión, no la identidad ya resuelta: la identidad se recalcula
+// en CADA envío. Antes se congelaba en el handshake, así que un socket abierto seguía
+// recibiendo nombres, DNIs y transcripciones indefinidamente aunque el médico hubiera
+// cerrado sesión o su sesión hubiera expirado. Quien capturara la cookie una vez conservaba
+// el feed de PII para siempre.
+function wsCredencial(req) {
   const cookies = auth.parseCookies(req);
-  const user = auth.getSessionUser(cookies[auth.COOKIE]);
-  if (user) return { kind: 'user', id: user.id, role: user.role };
+  const sid = cookies[auth.COOKIE];
+  if (sid && auth.getSessionUser(sid)) return { sid };
   try {
     const token = new URL(req.url, 'http://localhost').searchParams.get('token');
-    if (REQUIRED_TOKEN && token === REQUIRED_TOKEN) return { kind: 'device', id: 'device', role: 'device' };
+    if (REQUIRED_TOKEN && token === REQUIRED_TOKEN) return { device: true };
   } catch { /* noop */ }
+  return null;
+}
+
+// Identidad VIGENTE de este socket, ahora mismo. Null si la sesión murió.
+function wsIdentityAhora(ws) {
+  if (ws.cred?.device) return { kind: 'device', id: 'device', role: 'device' };
+  const u = ws.cred?.sid && auth.getSessionUser(ws.cred.sid);
+  if (u) return { kind: 'user', id: u.id, role: u.role };
   return null;
 }
 
@@ -757,9 +987,14 @@ function wsIdentity(req) {
 function broadcastRec(type, rec) {
   for (const ws of clients) {
     if (ws.readyState !== 1) continue;
-    if (ws.identity && ws.identity.kind === 'device') {
+    const identity = wsIdentityAhora(ws);          // se recalcula: logout y expiración cortan
+    if (authRequired() && !identity) {
+      try { ws.close(1008, 'sesión terminada'); } catch { /* noop */ }
+      continue;
+    }
+    if (identity && identity.kind === 'device') {
       ws.send(JSON.stringify({ type, recording: { id: rec.id, status: rec.status, error: rec.error || null, updatedAt: rec.updatedAt || rec.createdAt } }));
-    } else if (canSee(ws.identity, rec)) {
+    } else if (canSee(identity, rec)) {
       ws.send(JSON.stringify({ type, recording: publicRec(rec) }));
     }
   }
@@ -772,9 +1007,17 @@ function broadcastRaw(data) {
 }
 
 wss.on('connection', (ws, req) => {
-  ws.identity = wsIdentity(req);
-  // Si la auth está activa y el handshake no trae identidad → cerrar (1008 policy).
-  if (authRequired() && !ws.identity) { try { ws.close(1008, 'no autorizado'); } catch { /* noop */ } return; }
+  // Origin: un WebSocket NO respeta SameSite, así que sin esto cualquier página abierta en
+  // el navegador del médico podía conectarse y llevarse el stream completo de historias.
+  const origin = req.headers.origin;
+  if (origin && !ORIGINS_OK.includes(origin) && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) {
+    try { ws.close(1008, 'origen no permitido'); } catch { /* noop */ }
+    return;
+  }
+  ws.cred = wsCredencial(req);
+  // Si la auth está activa y el handshake no trae credencial → cerrar (1008 policy).
+  if (authRequired() && !wsIdentityAhora(ws)) { try { ws.close(1008, 'no autorizado'); } catch { /* noop */ } return; }
+  if (clients.size >= MAX_WS_CLIENTS) { try { ws.close(1013, 'demasiadas conexiones'); } catch { /* noop */ } return; }
   clients.add(ws);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });

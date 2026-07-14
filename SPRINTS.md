@@ -46,6 +46,13 @@ La lista que el Agente A verifica al cerrar **cada** sprint. Crece; nunca se pod
 26. **[S18]** Una consulta nunca se encola dos veces (carrera Detener / caída del micrófono).
 27. **[S18]** El audio recuperado conserva su formato real (mp4 en iPhone, no webm forzado).
 28. **[S18]** `npm test` descubre `test/sprint*.mjs` solo: ningún test puede quedar fuera por olvido.
+29. **[S19]** La firma cubre consentimiento, campos confirmados, salida de la IA y procedencia.
+30. **[S19]** Las firmas del esquema viejo siguen validando: un cambio de esquema no invalida historias.
+31. **[S19]** Una historia firmada NO se puede borrar (tiene valor legal).
+32. **[S19]** La firma prueba la AUTORÍA del médico: ni el servidor puede suplantarlo.
+33. **[S19]** Si el disco falla, el PUT no dice "firmado" — y un fallo de disco nunca tumba el servidor.
+34. **[S19]** El audit log está encadenado: editar una entrada se detecta.
+35. **[S19]** Un origen ajeno no puede escribir (CSRF), y el WS revalida la sesión en cada envío.
 
 ---
 
@@ -367,3 +374,102 @@ Arreglado de raíz, no en el síntoma:
 26. Una consulta nunca se encola dos veces (carrera Detener / caída del micrófono).
 27. El audio recuperado conserva su formato real (mp4 en iPhone, no webm forzado).
 28. `npm test` descubre `test/sprint*.mjs` solo: ningún test puede quedar fuera por olvido.
+
+## Sprint 19 — La firma dice la verdad · CERRADO 2026-07-13
+
+**Goal:** Una historia firmada no puede ser alterada por ningún camino, y su firma cubre todo
+lo que hay que probar en una auditoría.
+
+**Veredicto: CUMPLIDO** (tras cerrar el agujero que el Agente C encontró en el primer pase).
+
+### Qué cambió
+
+**La firma (v2).** La v1 sellaba solo el contenido. Quedaban fuera justo las tres cosas que
+hay que probar en una disputa:
+- `consent` — la base legal de todo el procesamiento. Sin ella en el sello, **cualquiera con
+  acceso al sidecar podía poner `granted: true` y `/verify` seguía diciendo que la historia
+  era íntegra.**
+- `confirmed` — qué campos de IA atestó el médico. Es la prueba del human-in-the-loop.
+- `fields_ia` — qué generó la máquina. Sin esto no se puede demostrar qué escribió el médico
+  y qué escribió el modelo, que es **LA** pregunta de una disputa.
+
+Más la **procedencia** (`whisper_model`, `llm_model`, `prompt_hash`, `app_version`): sin ella,
+con firma inmutable, no hay forma de explicar por qué una consulta de marzo se ve distinta de
+una de mayo. Las firmas v1 se siguen verificando con su esquema: **un cambio de esquema no
+puede invalidar historias legítimas en masa.**
+
+**No-repudio real (Ed25519).** El HMAC prueba que el contenido no cambió, pero la clave la
+conoce el servidor: **un admin podía forjar la firma de cualquier médico**, mientras
+`TERMS.md` promete exactamente lo contrario. Ahora cada médico tiene su par de claves; la
+privada se cifra con una clave derivada de **su** contraseña y solo se descifra al iniciar
+sesión. El servidor no puede firmar por él. El test 15 lo demuestra: con la clave maestra se
+forja el HMAC, pero la suplantación queda a la vista en la autoría.
+
+**Una historia firmada ya no se puede borrar.** Lo encontró el Agente C y es el hueco que
+hacía falso el goal: `DELETE` la destruía con borrado seguro, irrecuperable. Y borrar es
+**peor** que alterar — una alteración la detecta `/verify`, un borrado no deja nada que
+verificar. Un borrador sin firmar sí se puede borrar (el paciente retira el consentimiento).
+
+**El disco manda.** `persist()` se tragaba los errores: con el disco lleno, el `PUT` respondía
+200 con la firma, la UI decía "firmado", y al reiniciar la firma y las ediciones desaparecían.
+Ahora devuelve 500 y revierte la RAM.
+
+**Deuda de seguridad de los sprints 16-17, cerrada:**
+- **CSRF**: `SameSite=Strict` es **ciego al puerto**, así que cualquier otro servidor en tu
+  `localhost` (tienes un UTEC Gym en :8000) contaba como *same-site* y podía firmar historias
+  con la cookie del médico. Ahora se valida el `Origin` completo.
+- **El WebSocket** congelaba la identidad en el handshake: un socket abierto seguía recibiendo
+  nombres, DNIs y transcripciones **aunque el médico hubiera cerrado sesión**. Ahora se
+  revalida en cada envío. Más `Origin`, `maxPayload` y cap de conexiones.
+- **Timing attack**: si el usuario no existía, no se corría scrypt → respuesta instantánea →
+  se podía enumerar quién trabaja en la clínica. Hash señuelo.
+- **HKDF**: la misma clave cifraba y firmaba. Subclaves separadas por dominio (solo para las
+  firmas nuevas: cambiársela a las viejas las invalidaría todas).
+- **Audit log encadenado** con hashes + `GET /api/audit`. `readAudit()` existía desde el
+  Sprint 9 y **nadie podía llamarlo**: un log que no se puede leer no es evidencia, es un
+  archivo. Ahora cubre lecturas de historia y de audio (el fisgoneo es *el* incidente clásico
+  en clínicas), logout, reextract y denegaciones.
+
+### Tests
+
+- `test/sprint19_firma.mjs` → **15/15**.
+- Suite completa → **124/124, 0 fallas**, tres corridas seguidas limpias.
+
+### QA (protocolo anticagadas)
+
+- **Agente A (regresión):** 28/28 invariantes intactas — **y encontró un crítico que yo
+  introduje**. Al hacer que `persist()` lance, dejé dos llamadores sin capturar; uno es la
+  purga horaria de audio. O sea que **un fallo de disco transitorio tumbaría el servidor
+  entero** —matando el turno del médico y el trabajo en vuelo— que es exactamente lo contrario
+  de lo que este sprint viene a arreglar. Cerrado con `persistSoft`.
+- **Agente B (sabueso):** sin P0. Un P1 real: sin `trust proxy`, el CSRF **bloqueaba el login
+  detrás del túnel** que el propio `DEPLOY.md` recomienda. El deploy del piloto habría dejado
+  de funcionar sin que nadie entendiera por qué. Verificado con los tres escenarios (túnel OK,
+  ataque 403, móvil sin `Origin` OK).
+- **Agente C (verificador):** primer veredicto **"CUMPLIDO SOLO EN EL TEST"** — que bloquea el
+  cierre. Probó los 8 caminos de alteración uno por uno y encontró que **`DELETE` no
+  comprobaba `reviewed`**. También verificó lo que más miedo daba: que la firma **sobrevive a
+  un reinicio** (el payload se construye con orden de claves explícito, así que
+  `JSON.stringify` es determinista). Y fue honesto sobre lo que faltaba: el HMAC no daba
+  no-repudio. Ambas cosas cerradas.
+
+### Deuda abierta
+
+- **El HMAC del audit log usa la clave maestra**: quien la tenga puede reescribir la cadena
+  entera de forma consistente. La cadena detecta ediciones puntuales, no un reescrito total.
+  Un sellado de tiempo externo lo cerraría. → Post-piloto.
+- **La firma Ed25519 no es RENIECE**: es no-repudio técnico, no una firma digital legalmente
+  vinculante en Perú. `TERMS.md` ya lo dice. → Depende de un tercero.
+- **El audit log no rota**: `verifyAudit` es O(n) (127 ms con 100k entradas, medido). → S22.
+- La deuda del S17 y S18 sigue: consulta real de 20-30 min de punta a punta, y el móvil en un
+  iPhone real. → Antes del piloto.
+
+### Invariantes nuevas para el Agente A
+
+29. La firma cubre consentimiento, campos confirmados, salida de la IA y procedencia.
+30. Las firmas del esquema viejo siguen validando: un cambio de esquema no invalida historias.
+31. Una historia firmada NO se puede borrar (tiene valor legal).
+32. La firma prueba la AUTORÍA del médico: ni el servidor puede suplantarlo.
+33. Si el disco falla, el PUT no dice "firmado" — y un fallo de disco nunca tumba el servidor.
+34. El audit log está encadenado: editar una entrada se detecta.
+35. Un origen ajeno no puede escribir (CSRF), y el WS revalida la sesión en cada envío.

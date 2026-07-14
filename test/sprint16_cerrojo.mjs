@@ -130,8 +130,8 @@ try {
   const recId = 'del-target';
   const sidecar = join(D4, recId + '.json');
   enc.writeEncrypted(sidecar, JSON.stringify({
-    id: recId, patient: { name: 'Borrar', dni: '12345678' }, status: 'reviewed',
-    reviewed: true, createdAt: Date.now(),
+    id: recId, patient: { name: 'Borrar', dni: '12345678' }, status: 'done',
+    reviewed: false, createdAt: Date.now(),   // sin firmar: una firmada NO se puede borrar (S19)
   }));
   const before = readFileSync(sidecar); // ciphertext en disco
   // El server no lo tiene en RAM (se creó después del loadAll); forzamos recarga vía retry no aplica.

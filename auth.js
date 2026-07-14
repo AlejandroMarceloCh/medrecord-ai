@@ -81,9 +81,17 @@ function createUser({ username, password, name, role }) {
   if (!username || !password) throw new Error('faltan usuario o contraseña');
   if ([...users.values()].some(u => u.username === username)) throw new Error('el usuario ya existe');
   const { salt, hash } = hashPassword(password);
+  // Par de claves del médico. La privada NO se guarda en claro: se cifra con una clave
+  // derivada de su contraseña, así que el servidor no puede firmar por él sin que él entre.
+  // Eso es lo que convierte la firma en no-repudio: un admin no puede suplantarlo.
+  const par = enc.generarParDeClaves();
+  const keySalt = crypto.randomBytes(16).toString('hex');
   const user = {
     id: crypto.randomUUID(), username, salt, hash,
     name: String(name || username), role: role === 'admin' ? 'admin' : 'medico',
+    publicKey: par.publicKey,
+    privateKeyEnc: enc.cifrarConPassword(par.privateKey, password, keySalt),
+    keySalt,
     createdAt: Date.now(),
   };
   users.set(user.id, user);
@@ -95,10 +103,20 @@ function publicUser(u) { return u && { id: u.id, username: u.username, name: u.n
 function listUsers() { return [...users.values()].map(publicUser); }
 function countUsers() { return users.size; }
 
+// Salt y hash señuelo: cuando el usuario NO existe corremos scrypt igual, contra esto.
+// Sin ello, "usuario inexistente" respondía en ~0 ms y "usuario válido, clave mala" gastaba
+// los ~50 ms del scrypt: la diferencia es trivial de medir y permite enumerar quién trabaja
+// en la clínica.
+const SENUELO = hashPassword(crypto.randomBytes(32).toString('hex'));
+
 function authenticate(username, password) {
   username = String(username || '').trim().toLowerCase();
   const u = [...users.values()].find(x => x.username === username);
-  if (!u || !verifyPassword(password, u.salt, u.hash)) return null;
+  if (!u) {
+    verifyPassword(password, SENUELO.salt, SENUELO.hash);   // gasta el mismo tiempo
+    return null;
+  }
+  if (!verifyPassword(password, u.salt, u.hash)) return null;
   return u;
 }
 
@@ -126,10 +144,31 @@ function bootstrapAdmin() {
 }
 
 // ── Sesiones ──
-function createSession(userId) {
+function createSession(userId, privateKey = null) {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { userId, exp: Date.now() + SESSION_TTL_MS });
+  // La clave privada vive en RAM mientras dure la sesión. Al cerrar sesión (o al reiniciar
+  // el servidor) desaparece: nadie puede firmar en nombre del médico si él no está.
+  sessions.set(token, { userId, privateKey, exp: Date.now() + SESSION_TTL_MS });
   return token;
+}
+
+// Clave privada del médico de esta sesión, para firmar. Null si no la tiene.
+function sessionPrivateKey(token) {
+  const s = token && sessions.get(token);
+  if (!s || s.exp < Date.now()) return null;
+  return s.privateKey || null;
+}
+
+// Descifra la privada del médico con su contraseña (solo en el login).
+function unlockPrivateKey(user, password) {
+  if (!user.privateKeyEnc || !user.keySalt) return null;   // usuario creado antes de las claves
+  try { return enc.descifrarConPassword(user.privateKeyEnc, password, user.keySalt); }
+  catch { return null; }
+}
+
+function publicKeyOf(userId) {
+  const u = users.get(userId);
+  return (u && u.publicKey) || null;
 }
 function getSessionUser(token) {
   const s = token && sessions.get(token);
@@ -159,20 +198,57 @@ function clearCookie() {
   return `${COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0`;
 }
 
-// ── Audit log (JSONL, sin PII) ──
-function audit(entry) {
-  try { fs.appendFileSync(auditFile, JSON.stringify({ ts: Date.now(), ...entry }) + '\n'); }
-  catch { /* no bloquea la operación */ }
+// ── Audit log (JSONL, sin PII, encadenado) ──
+//
+// Cada entrada lleva el hash de la anterior. Antes era un JSONL suelto: quien tuviera acceso
+// al disco podía reescribirlo entero sin dejar rastro, y un audit log que se puede reescribir
+// no sirve como evidencia — que es lo único para lo que existe.
+//
+// La cadena no impide que alguien borre el archivo; impide que lo EDITE sin que se note:
+// cambiar o quitar una entrada rompe el encadenado de todas las siguientes.
+let ultimoHash = null;
+
+function hashEntrada(entrada) {
+  return crypto.createHash('sha256').update(JSON.stringify(entrada)).digest('hex').slice(0, 16);
 }
+
+function audit(entry) {
+  try {
+    if (ultimoHash === null) {
+      const previas = readAudit();
+      ultimoHash = previas.length ? previas[previas.length - 1].h : '';
+    }
+    const e = { ts: Date.now(), ...entry, prev: ultimoHash };
+    e.h = hashEntrada(e);
+    fs.appendFileSync(auditFile, JSON.stringify(e) + '\n');
+    ultimoHash = e.h;
+  } catch { /* no bloquea la operación clínica */ }
+}
+
 function readAudit() {
   try {
     return fs.readFileSync(auditFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
   } catch { return []; }
 }
 
+// ¿La cadena está intacta? Devuelve la primera entrada adulterada, si la hay.
+function verifyAudit() {
+  const filas = readAudit();
+  let prev = '';
+  for (let i = 0; i < filas.length; i++) {
+    const f = filas[i];
+    const { h, ...sinHash } = f;
+    if (f.prev !== prev || hashEntrada(sinHash) !== h) {
+      return { valid: false, brokenAt: i, total: filas.length };
+    }
+    prev = h;
+  }
+  return { valid: true, total: filas.length };
+}
+
 module.exports = {
   init, bootstrapAdmin, createUser, listUsers, countUsers, authenticate, publicUser,
-  createSession, getSessionUser, destroySession,
+  createSession, getSessionUser, destroySession, sessionPrivateKey, unlockPrivateKey, publicKeyOf,
   parseCookies, sessionCookie, clearCookie, COOKIE,
-  audit, readAudit,
+  audit, readAudit, verifyAudit,
 };

@@ -153,4 +153,4 @@ async function transcribe(inputPath, { lang = LANG, prompt = MEDICAL_PROMPT } = 
   }
 }
 
-module.exports = { transcribe, checkEnv, MEDICAL_PROMPT, timeoutFor };
+module.exports = { transcribe, checkEnv, MEDICAL_PROMPT, timeoutFor, MODEL };

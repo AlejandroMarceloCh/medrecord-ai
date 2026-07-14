@@ -214,4 +214,9 @@ async function extractFields(transcript, { patient, date } = {}) {
   return normalize(parsed, { patient, date, transcript });
 }
 
-module.exports = { extractFields, available, emptyFields, normalize, MODEL, contextFor, estimateTokens, CTX_MAX };
+// Huella del prompt del sistema. Cambiarlo cambia lo que el modelo extrae; sin registrar
+// cuál se usó, una historia de marzo y una de mayo son incomparables y nadie puede explicar
+// por qué. Con firma inmutable, eso es un problema legal, no estético.
+const PROMPT_HASH = require('node:crypto').createHash('sha256').update(SYSTEM).digest('hex').slice(0, 12);
+
+module.exports = { extractFields, available, emptyFields, normalize, MODEL, contextFor, estimateTokens, CTX_MAX, PROMPT_HASH };
