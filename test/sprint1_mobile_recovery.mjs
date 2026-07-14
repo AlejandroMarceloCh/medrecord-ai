@@ -5,10 +5,33 @@
 //
 // Uso: con el server corriendo  →  node test/sprint1_mobile_recovery.mjs
 import { chromium } from 'playwright';
-import { readFileSync, readdirSync } from 'node:fs';
+import { levantarServer } from './_server.mjs';
+import { readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const BASE = process.env.BASE || 'http://localhost:3331';
+// Autónomo: levanta su propio server (antes exigía uno en :3331 y por eso nunca
+// corría en `npm test` — así fue como el Sprint 18 lo rompió sin que nadie lo viera).
+const servidor = process.env.BASE ? null : await levantarServer({
+  // Caso 7 necesita una historia ya procesada. La sembramos en vez de exigir que Whisper y
+  // Ollama estén instalados (y en vez de leer las consultas reales que haya en el disco).
+  async seed(dataDir, keyFile) {
+    process.env.MEDRECORD_KEY_FILE = keyFile;
+    const { createRequire } = await import('node:module');
+    const req = createRequire(import.meta.url);
+    delete req.cache[req.resolve('../crypto.js')];
+    const enc = req('../crypto.js');
+    enc.writeEncrypted(join(dataDir, 'seed-done.json'), JSON.stringify({
+      id: 'seed-done', patient: { name: 'Historia Sembrada', dni: '' },
+      status: 'done', reviewed: false, transcript: 'Transcripcion de prueba.',
+      consent: { granted: true, at: Date.now() }, version: 0,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }));
+    delete process.env.MEDRECORD_KEY_FILE;
+  },
+});
+const BASE = process.env.BASE || servidor.base;
 const LEN = 4096;
 
 // ── helpers en Node ───────────────────────────────────────────────────────────
@@ -40,7 +63,7 @@ function seedInPage({ name, len, seed }) {
   const localId = 'PW' + Date.now() + Math.floor(Math.random() * 1e6);
   return window.MRQueue.put({
     localId, serverId: null, uploaded: false, blob: new Blob([bytes], { type: 'audio/ogg' }),
-    type: 'audio/ogg', meta: { name, dni: '' }, dur: 5, createdAt: Date.now(), tries: 0,
+    type: 'audio/ogg', meta: { name, dni: '', consent: true }, dur: 5, createdAt: Date.now(), tries: 0,
   }).then(() => ({ localId, sum }));
 }
 async function clearIdbInPage() { const all = await window.MRQueue.all(); for (const r of all) await window.MRQueue.del(r.localId); }
@@ -161,7 +184,7 @@ try {
   else {
     await page.evaluate((sid) => window.MRQueue.put({
       localId: 'PWsync' + Date.now(), serverId: sid, uploaded: true, blob: undefined,
-      type: 'audio/ogg', meta: { name: 'PWTEST_sync' }, dur: 5, createdAt: Date.now(), tries: 0,
+      type: 'audio/ogg', meta: { name: 'PWTEST_sync', consent: true }, dur: 5, createdAt: Date.now(), tries: 0,
     }), reviewed.id);
     await page.reload(); await page.waitForSelector(SEL, { timeout: 15000 });
     // resumeAll → ensureWs + syncStatusOnce(serverId) → la fila debe mostrar "Listo …"
@@ -174,22 +197,30 @@ try {
 // ── 8. Audio REAL (.ogg de disco) sube íntegro ────────────────────────────────
 try {
   await page.evaluate(clearIdbInPage);
-  const dir = join(process.cwd(), 'data', 'recordings');
-  const oggName = readdirSync(dir).find(f => f.endsWith('.ogg') || f.endsWith('.webm') || f.endsWith('.mp4'));
-  if (!oggName) { rec('8 · audio real íntegro', false, 'no hay audio real en data/recordings'); }
+  // Audio REAL generado al vuelo con ffmpeg. Antes este caso leía un .ogg de
+  // data/recordings, o sea usaba grabaciones de pacientes reales como fixture de test —
+  // y además hacía que el test no corriera en una máquina limpia.
+  const wavTmp = join(tmpdir(), 'medrec-fixture-' + Date.now() + '.ogg');
+  let bytes = null;
+  try {
+    execFileSync('ffmpeg', ['-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+      '-ac', '1', '-ar', '16000', '-y', wavTmp], { stdio: 'ignore' });
+    bytes = readFileSync(wavTmp);
+  } catch { /* sin ffmpeg no podemos generar el fixture */ }
+  if (!bytes) { rec('8 · audio real íntegro', false, 'ffmpeg no disponible para generar el audio de prueba'); }
   else {
-    const bytes = readFileSync(join(dir, oggName));
     const realSum = checksumBytes(new Uint8Array(bytes));
     const name = 'PWTEST_real_' + Date.now();
     await page.evaluate(async ({ name, b64 }) => {
       const bin = atob(b64); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      await window.MRQueue.put({ localId: 'PWreal' + Date.now(), serverId: null, uploaded: false, blob: new Blob([arr], { type: 'audio/ogg' }), type: 'audio/ogg', meta: { name, dni: '' }, dur: 8, createdAt: Date.now(), tries: 0 });
+      await window.MRQueue.put({ localId: 'PWreal' + Date.now(), serverId: null, uploaded: false, blob: new Blob([arr], { type: 'audio/ogg' }), type: 'audio/ogg', meta: { name, dni: '', consent: true }, dur: 8, createdAt: Date.now(), tries: 0 });
     }, { name, b64: bytes.toString('base64') });
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
     const r = await findOnServer(name, 20000);
     let ok = false, detail = 'no llegó';
     if (r) { const c = await audioOnServer(r.id); ok = c.len === bytes.length && c.sum === realSum; detail = `${bytes.length}B, checksum ${ok ? 'coincide' : 'NO'}`; }
     rec('8 · audio real íntegro (byte a byte)', ok, detail);
+    try { rmSync(wavTmp, { force: true }); } catch { /* noop */ }
   }
 } catch (e) { rec('8 · audio real íntegro', false, String(e.message)); }
 
@@ -211,4 +242,5 @@ console.log('\nSprint 1 — suite al goal "nunca se pierde una grabación":\n');
 let pass = 0;
 for (const r of results) { console.log(`  [${r.ok ? 'PASA' : 'FALLA'}]  ${r.name}\n           ${r.detail}`); if (r.ok) pass++; }
 console.log(`\n  ${pass}/${results.length} casos.  ${pass === results.length ? '✓ GOAL CUMPLIDO' : '✗ HAY FALLAS'}\n`);
+if (servidor) servidor.cerrar();
 process.exit(pass === results.length ? 0 : 1);

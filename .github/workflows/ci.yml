@@ -12,6 +12,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm ci || npm install
+      - run: npm ci
+
+      # La suite corre el móvil en un Chromium real con micrófono falso: sin el navegador
+      # instalado, los tests de Playwright fallan al arrancar. Y ffmpeg genera el audio de
+      # prueba (antes el fixture era una grabación real de paciente del disco del dev).
+      - run: npx playwright install --with-deps chromium
+      - run: sudo apt-get install -y ffmpeg
+
       - run: npm run build
       - run: npm test

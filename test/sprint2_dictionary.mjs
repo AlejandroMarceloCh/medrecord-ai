@@ -4,9 +4,33 @@
 //
 // Uso: con el server corriendo en :3331  →  node test/sprint2_dictionary.mjs
 import { chromium } from 'playwright';
+import { levantarServer } from './_server.mjs';
 import { readFileSync } from 'node:fs';
 
-const BASE = process.env.BASE || 'http://localhost:3331';
+// Autónomo: levanta su propio server (antes exigía uno en :3331 y por eso nunca
+// corría en `npm test` — así fue como el Sprint 18 lo rompió sin que nadie lo viera).
+const servidor = process.env.BASE ? null : await levantarServer({
+  // El test necesita una historia revisada con transcripción. Se siembra, en vez de
+  // depender de que haya consultas reales de pacientes en el disco del desarrollador.
+  async seed(dataDir, keyFile) {
+    process.env.MEDRECORD_KEY_FILE = keyFile;
+    const { createRequire } = await import('node:module');
+    const { join } = await import('node:path');
+    const req = createRequire(import.meta.url);
+    delete req.cache[req.resolve('../crypto.js')];
+    const enc = req('../crypto.js');
+    enc.writeEncrypted(join(dataDir, 'seed-dict.json'), JSON.stringify({
+      id: 'seed-dict', patient: { name: 'Prueba Diccionario', dni: '' },
+      status: 'reviewed', reviewed: true, reviewedAt: Date.now(),
+      transcript: 'El paciente refiere cefalea intensa y presenta hipertension arterial marcada en el examen.',
+      fields: { anamnesis: { motivo_consulta: 'cefalea' } },
+      consent: { granted: true, at: Date.now() }, version: 1,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }));
+    delete process.env.MEDRECORD_KEY_FILE;
+  },
+});
+const BASE = process.env.BASE || servidor.base;
 const RIGHT = 'DICCIONARIOOK';
 const results = [];
 const rec = (name, ok, detail) => results.push({ name, ok, detail });
@@ -29,6 +53,9 @@ try {
   const page = await ctx.newPage();
   await page.goto(`${BASE}/web`);
 
+  // Sin pendientes, la app arranca en modo foco ("Todo al día"), no en el listado: hay que
+  // entrar a Consultas antes de que exista el tab de Revisadas.
+  await page.click('button:has-text("Consultas")');
   await page.click('button:has-text("Revisadas")');
   await page.click(`text=${JSON.stringify(target.patient.name)}`);
   await page.waitForSelector('span:has-text("Transcripción")', { timeout: 10000 });
@@ -61,4 +88,5 @@ console.log('\nSprint 2 — test al goal "que lo visible no mienta":\n');
 let pass = 0;
 for (const r of results) { console.log(`  [${r.ok ? 'PASA' : 'FALLA'}]  ${r.name}\n           ${r.detail}`); if (r.ok) pass++; }
 console.log(`\n  ${pass}/${results.length} casos.  ${pass === results.length ? '✓ GOAL CUMPLIDO' : '✗ HAY FALLAS'}\n`);
+if (servidor) servidor.cerrar();
 process.exit(pass === results.length ? 0 : 1);

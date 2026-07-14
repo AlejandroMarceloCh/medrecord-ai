@@ -41,6 +41,11 @@ La lista que el Agente A verifica al cerrar **cada** sprint. Crece; nunca se pod
 21. **[S17]** Una transcripción que no cabe en el contexto nunca produce campos vacíos en silencio.
 22. **[S17]** No se puede firmar una historia vacía (sin transcripción y sin ningún campo).
 23. **[S17]** El cliente no influye en el timeout de Whisper: la duración la mide el servidor.
+24. **[S18]** El móvil no carga ningún recurso de un CDN y abre sin conexión.
+25. **[S18]** La pantalla de grabación nunca muestra "grabando" si el micrófono está muerto.
+26. **[S18]** Una consulta nunca se encola dos veces (carrera Detener / caída del micrófono).
+27. **[S18]** El audio recuperado conserva su formato real (mp4 en iPhone, no webm forzado).
+28. **[S18]** `npm test` descubre `test/sprint*.mjs` solo: ningún test puede quedar fuera por olvido.
 
 ---
 
@@ -261,3 +266,104 @@ verificar los fixes.
 21. Una transcripción que no cabe en el contexto nunca produce campos vacíos en silencio.
 22. No se puede firmar una historia vacía (sin transcripción y sin ningún campo).
 23. El cliente no influye en el timeout de Whisper: la duración la mide el servidor.
+
+## Sprint 18 — El móvil no miente · CERRADO 2026-07-13
+
+**Goal:** La pantalla de grabación refleja el estado real del micrófono, y la app abre y
+graba sin conexión a internet.
+
+**Veredicto: CUMPLIDO** (el Agente C lo verificó grabando offline de verdad, matando la
+pestaña a mitad de consulta, y silenciando el micrófono con un `GainNode` en cero).
+
+### Qué cambió
+
+El móvil era un HTML de 609 líneas que transpilaba JSX en el navegador. Ahora son módulos
+compilados con esbuild (`src/mobile/`), igual que la web.
+
+- **La onda sale del micrófono.** `level.js` mide RMS real con un `AnalyserNode`. Antes era
+  un `@keyframes` de CSS y el cronómetro un `setInterval`: **ninguno de los dos tocaba el
+  micrófono**. Si iOS le quitaba el micro a la app —una llamada entrante basta—, la pantalla
+  seguía diciendo "Grabando 14:32" con la onda bailando, y el médico terminaba la consulta
+  convencido de que había grabado. Una onda que miente es peor que no tener onda.
+- **`rec.onerror` + `track.onended`**: si el micrófono muere, la app sale del estado grabando,
+  avisa por qué, y **conserva lo grabado hasta el corte**.
+- **Aviso de silencio**: 6 segundos sin voz → "No estamos captando sonido. Revisa el micrófono."
+- **`timeslice` de 5 s + chunks a IndexedDB al vuelo.** Antes 20 minutos de consulta vivían en
+  RAM y era todo o nada si iOS mataba la pestaña. Ahora lo peor que se pierde son segundos, y
+  al reabrir la app ofrece recuperar lo grabado.
+- **Sin CDN.** Cargaba React *development* y Babel standalone (~3 MB) desde unpkg, y
+  `build.mjs` solo **copiaba** el HTML a `dist/`, así que producción también dependía del CDN.
+  Sin internet, la app **no existía**: pantalla en blanco, con el paciente enfrente — mientras
+  el propio cartel prometía *"tus grabaciones se suben solas al volver"*. Ahora hay bundle
+  local, fuentes del sistema y un service worker que precachea el shell.
+- **Descartar** (con diálogo destructivo que dice qué se borra), **pausa/reanudar**, blob vacío
+  con error visible en vez de un falso éxito silencioso, y **el nombre pasa a ser opcional**:
+  solo el consentimiento es obligatorio. El flujo real es "entra el paciente → grabo", no
+  "tipeo el nombre completo con el paciente esperando".
+- **Login en el móvil**: sin sesión, el audio subía con el token de device y quedaba con
+  `ownerId: null` — un médico no-admin **nunca veía las grabaciones que él mismo acababa de
+  hacer**. Hoy funcionaba por accidente porque el único usuario era el admin.
+
+### Tests
+
+- `test/sprint18_movil.mjs` → **10/10**, en Chromium real con micrófono falso.
+- Suite completa → **109/109, 0 fallas, 17 suites**.
+
+### QA (protocolo anticagadas)
+
+- **Agente A (regresión):** 23/23 invariantes intactas. Verificó que el service worker excluye
+  `/api` (la PII no va al Cache Storage) y que el "bypass" de `whoami` sin red no permite leer
+  nada: el servidor sigue exigiendo identidad.
+- **Agente B (sabueso):** 2 P0 + 1 P1 + 1 P2, todos corregidos.
+  - **P0:** al recuperar un borrador huérfano, el `mimeType` estaba **hardcodeado a webm**.
+    Safari en iPhone graba **mp4**: subíamos bytes mp4 con extensión `.webm`, Whisper recibía
+    un contenedor renombrado y la transcripción salía basura — **justo en el caso que esa
+    feature existe para salvar**. Ahora cada trozo guarda su formato real.
+  - **P0:** carrera entre "Detener" y la caída del micrófono (el paciente cuelga una llamada
+    justo cuando el médico termina): las dos rutas ensamblaban el mismo audio y lo encolaban
+    **dos veces** → dos consultas duplicadas, ambas transcritas por separado. Guard idempotente.
+  - **P1:** los trozos huérfanos se acumulaban en IndexedDB para siempre — audio de paciente
+    creciendo sin límite en el teléfono. Ahora se barren al abrir.
+  - **P2:** la duración del borrador recuperado se sobreestimaba (`chunks × 5s`); ahora sale de
+    los timestamps reales.
+- **Agente C (verificador):** **GOAL CUMPLIDO** en comportamiento real — grabó offline y vio la
+  cola drenar al reconectar; silenció el micrófono con un `GainNode` y el aviso apareció; mató
+  la pestaña a mitad de consulta y recuperó 72 KB de audio válido. **Y encontró la regresión más
+  peligrosa del sprint**: al pasar el móvil a módulos, `window.MRQueue` dejó de existir y
+  `sprint1_mobile_recovery` —el arnés que garantiza *"una grabación nunca se pierde"*— pasó a
+  **1/9 sin que nadie lo notara, porque nunca corría en `npm test`**.
+
+### La lección del sprint
+
+Al arreglar ese arnés apareció algo peor: **llevaba roto desde el Sprint 14**. Sus fixtures
+inyectaban grabaciones sin `consent`, y el Sprint 14 hizo el consentimiento obligatorio. El
+test que garantizaba la promesa central del móvil estuvo mintiendo durante semanas, y no se
+notó por una sola razón: **no corría**.
+
+Arreglado de raíz, no en el síntoma:
+- `sprint1` y `sprint2` son **autónomos** (levantan su propio server y siembran sus datos).
+- `npm test` ahora **descubre `test/sprint*.mjs` solo**: un test nuevo no puede quedar fuera
+  por olvido, que es exactamente como pasó esto.
+- El caso 8 de `sprint1` leía un `.ogg` de `data/recordings` — o sea **usaba grabaciones reales
+  de pacientes como fixture**. Ahora genera audio sintético con ffmpeg.
+- Los tests ya no usan puertos fijos (`_port.mjs`): dos suites seguidas colisionaban en
+  `TIME_WAIT` y una fallaba sin motivo. Un test que falla por su propia infraestructura enseña
+  a ignorar el rojo.
+- El CI instala Chromium y ffmpeg.
+
+### Deuda abierta
+
+- **El caso 6 de `sprint18`** (blob vacío) sigue siendo un regex sobre el fuente, no
+  comportamiento. El Agente C lo señaló; se puede probar de verdad mockeando `MediaRecorder`.
+- **Nadie ha probado el móvil en un iPhone real.** Todo el mp4/Safari es razonamiento sobre la
+  API, no observación. → Antes del piloto.
+- La deuda del S16 y S17 sigue abierta (CSRF, WS que congela identidad, timing attack, HMAC sin
+  no-repudio, consulta real de 20-30 min de punta a punta). → **Sprint 19 y 22.**
+
+### Invariantes nuevas para el Agente A
+
+24. El móvil no carga ningún recurso de un CDN y abre sin conexión.
+25. La pantalla de grabación nunca muestra "grabando" si el micrófono está muerto.
+26. Una consulta nunca se encola dos veces (carrera Detener / caída del micrófono).
+27. El audio recuperado conserva su formato real (mp4 en iPhone, no webm forzado).
+28. `npm test` descubre `test/sprint*.mjs` solo: ningún test puede quedar fuera por olvido.

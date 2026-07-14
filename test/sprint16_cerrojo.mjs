@@ -15,6 +15,7 @@ import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { freePort } from './_port.mjs';
 
 const require = createRequire(import.meta.url);
 const realFetch = globalThis.fetch;
@@ -51,7 +52,7 @@ try {
   const truncated = Buffer.from('0123456789'); // 10 bytes
   writeFileSync(keyFile, truncated);
   const r = await spawnAndWaitExit({
-    ...process.env, PORT: '3421', NODE_ENV: 'development',
+    ...process.env, PORT: String(await freePort()), NODE_ENV: 'development',
     MEDRECORD_DATA_DIR: join(w, 'recordings'), MEDRECORD_KEY_FILE: keyFile, MEDRECORD_OPEN: '1',
   });
   const stillTruncated = readFileSync(keyFile);
@@ -74,7 +75,7 @@ try {
   const encOther = require('../crypto.js');
   encOther.writeEncrypted(join(D, 'users.json'), JSON.stringify([{ id: 'x', username: 'a' }]));
   const r = await spawnAndWaitExit({
-    ...process.env, PORT: '3422', NODE_ENV: 'development',
+    ...process.env, PORT: String(await freePort()), NODE_ENV: 'development',
     MEDRECORD_DATA_DIR: D, MEDRECORD_KEY_FILE: join(w, '.master.key'), MEDRECORD_OPEN: '1',
   });
   add('2 · users.json indescifrable → aborta (no arranca sin auth)',
@@ -86,7 +87,7 @@ finally { delete process.env.MEDRECORD_KEY_FILE; delete require.cache[require.re
 // ── 3. Sin usuarios, sin token, sin OPEN → aborta (el fail-open del deploy documentado) ──
 try {
   const w = mkdtempSync(join(tmpdir(), 'medrec-s16c-'));
-  const env = { ...process.env, PORT: '3423', NODE_ENV: 'production',
+  const env = { ...process.env, PORT: String(await freePort()), NODE_ENV: 'production',
     MEDRECORD_DATA_DIR: join(w, 'recordings'), MEDRECORD_KEY_FILE: join(w, '.key') };
   delete env.MEDRECORD_ADMIN_USER; delete env.MEDRECORD_ADMIN_PASS;
   delete env.MEDRECORD_TOKEN; delete env.MEDRECORD_OPEN;
@@ -99,15 +100,16 @@ try {
 // ── 4+5+6. Con admin: 401 sin sesión, DELETE con borrado seguro, retención activa ──
 const w4 = mkdtempSync(join(tmpdir(), 'medrec-s16d-'));
 const D4 = join(w4, 'recordings'); mkdirSync(D4, { recursive: true });
+const P4 = await freePort();
 const srv = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: '3424', NODE_ENV: 'development',
+  env: { ...process.env, PORT: String(P4), NODE_ENV: 'development',
     MEDRECORD_DATA_DIR: D4, MEDRECORD_KEY_FILE: join(w4, '.key'),
     MEDRECORD_ADMIN_USER: 'doc', MEDRECORD_ADMIN_PASS: 'clave-larga-123' },
   stdio: 'ignore',
 });
 try {
-  await waitHealth('http://localhost:3424');
-  const base = 'http://localhost:3424';
+  await waitHealth(`http://localhost:${P4}`);
+  const base = `http://localhost:${P4}`;
 
   // 4. Sin cookie de sesión, la lista de historias no se sirve.
   const anon = await realFetch(`${base}/api/recordings`);
@@ -135,19 +137,20 @@ try {
   // El server no lo tiene en RAM (se creó después del loadAll); forzamos recarga vía retry no aplica.
   // En su lugar reiniciamos NO; usamos que loadAll corre al arranque → reiniciamos el server.
   srv.kill('SIGKILL');
+  const P5 = await freePort();
   const srv2 = spawn('node', ['server.js'], {
-    env: { ...process.env, PORT: '3425', NODE_ENV: 'development',
+    env: { ...process.env, PORT: String(P5), NODE_ENV: 'development',
       MEDRECORD_DATA_DIR: D4, MEDRECORD_KEY_FILE: join(w4, '.key'),
       MEDRECORD_ADMIN_USER: 'doc', MEDRECORD_ADMIN_PASS: 'clave-larga-123' },
     stdio: 'ignore',
   });
-  await waitHealth('http://localhost:3425');
-  const login2 = await realFetch('http://localhost:3425/api/login', {
+  await waitHealth(`http://localhost:${P5}`);
+  const login2 = await realFetch(`http://localhost:${P5}/api/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'doc', password: 'clave-larga-123' }),
   });
   const cookie2 = (login2.headers.get('set-cookie') || '').split(';')[0];
-  const del = await realFetch('http://localhost:3425/api/recordings/' + recId, {
+  const del = await realFetch(`http://localhost:${P5}/api/recordings/` + recId, {
     method: 'DELETE', headers: { Cookie: cookie2 },
   });
   const gone = !existsSync(sidecar);
@@ -181,7 +184,7 @@ try {
   const wrongKey = join(w, '.wrong.key');
   writeFileSync(wrongKey, require('node:crypto').randomBytes(32));
   const r = await spawnAndWaitExit({
-    ...process.env, PORT: '3426', NODE_ENV: 'development',
+    ...process.env, PORT: String(await freePort()), NODE_ENV: 'development',
     MEDRECORD_DATA_DIR: D, MEDRECORD_KEY_FILE: wrongKey, MEDRECORD_OPEN: '1',
   });
   const intactos = existsSync(join(D, 'rec-a.json')) && existsSync(join(D, 'rec-b.json'))
@@ -198,7 +201,7 @@ finally { delete process.env.MEDRECORD_KEY_FILE; try { delete require.cache[requ
 try {
   const w = mkdtempSync(join(tmpdir(), 'medrec-s16f-'));
   const r = await spawnAndWaitExit({
-    ...process.env, PORT: '3427', NODE_ENV: 'development',
+    ...process.env, PORT: String(await freePort()), NODE_ENV: 'development',
     MEDRECORD_DATA_DIR: join(w, 'recordings'), MEDRECORD_KEY_FILE: join(w, '.key'),
     MEDRECORD_ADMIN_USER: 'admin', MEDRECORD_ADMIN_PASS: 'cambia-esta-clave',
   });
@@ -223,12 +226,13 @@ try {
     audioFile, audioEnc: true, createdAt: Date.now() - 200 * 86400000,
     reviewedAt: Date.now() - 200 * 86400000,
   }));
-  const env = { ...process.env, PORT: '3428', NODE_ENV: 'development',
+  const P8 = await freePort();
+  const env = { ...process.env, PORT: String(P8), NODE_ENV: 'development',
     MEDRECORD_DATA_DIR: D, MEDRECORD_KEY_FILE: join(w, '.key'),
     MEDRECORD_ADMIN_USER: 'doc', MEDRECORD_ADMIN_PASS: 'clave-larga-123' };
   delete env.MEDRECORD_AUDIO_RETENTION_DAYS;          // sin política configurada
   const p = spawn('node', ['server.js'], { env, stdio: 'ignore' });
-  await waitHealth('http://localhost:3428');
+  await waitHealth(`http://localhost:${P8}`);
   const sobrevive = existsSync(join(D, audioFile));
   add('8 · sin política de retención, el audio viejo NO se borra al arrancar',
     sobrevive, `audioSobrevive=${sobrevive}`);

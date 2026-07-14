@@ -20,6 +20,7 @@ import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { freePort } from './_port.mjs';
 
 const require = createRequire(import.meta.url);
 const results = [];
@@ -76,7 +77,7 @@ chmodSync(fakeFfmpeg, 0o755);
 const fakeModel = join(w, 'model.bin'); writeFileSync(fakeModel, 'x');
 const fakeVad   = join(w, 'vad.bin');   writeFileSync(fakeVad, 'x');
 
-const PORT = 3431;
+const PORT = await freePort();
 const srv = spawn('node', ['server.js'], {
   env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', MEDRECORD_OPEN: '1',
     MEDRECORD_DATA_DIR: DATA, MEDRECORD_KEY_FILE: join(w, '.key'),
@@ -213,7 +214,7 @@ chmodSync(ff7, 0o755);
 const m7 = join(w7, 'm.bin'); writeFileSync(m7, 'x');
 const v7 = join(w7, 'v.bin'); writeFileSync(v7, 'x');
 
-const P7 = 3432;
+const P7 = await freePort();
 const srv7 = spawn('node', ['server.js'], {
   env: { ...process.env, PORT: String(P7), NODE_ENV: 'development', MEDRECORD_OPEN: '1',
     MEDRECORD_DATA_DIR: D7, MEDRECORD_KEY_FILE: join(w7, '.key'), MEDRECORD_AUDIO_RETENTION_DAYS: '0',

@@ -712,6 +712,14 @@ app.delete('/api/recordings/:id', (req, res) => {
 });
 
 // ── Estáticos + páginas ──
+// El service worker se sirve SIN cache: si el navegador se queda con una copia vieja de
+// sw.js, la app puede quedar congelada en una versión antigua durante días. Y va desde la
+// raíz porque un SW solo controla su propio directorio hacia abajo.
+app.get('/sw.js', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.sendFile(path.join(STATIC_DIR, 'sw.js'));
+});
 app.use(express.static(STATIC_DIR, {
   setHeaders(res, filePath) {
     if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
