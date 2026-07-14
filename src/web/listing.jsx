@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Icon } from './icons.jsx';
-import { Avatar, Spinner } from './ui.jsx';
+import { Avatar, Spinner, Btn } from './ui.jsx';
 import {
   recName, recInitials, avatarColor, fmtDur, fmtDate, fmtClock,
   recAge, recSummary, recCompletion, dayKey, dayLabel,
@@ -116,7 +116,64 @@ function DayHeader({ label, count }) {
 
 const GRID = { display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px, 1fr))', gap:16 };
 
-export function ListingView({ recs, tab, setTab, sort, setSort, onSelect }) {
+// ── Fila densa ───────────────────────────────────────────────────────────────
+// "Por revisar" es la cola de trabajo del día. Con cards de 280px caben ~6 pacientes por
+// pantalla; con filas, 25. Con 12-30 consultas diarias, esa es la diferencia entre ver el
+// día completo de un vistazo o descubrirlo bajando por un scroll.
+function RecRow({ rec, onClick }) {
+  const [hov, setHov] = useState(false);
+  const name    = recName(rec);
+  const isError = rec.status === 'error';
+  const isProc  = ['received','queued','processing','filling'].includes(rec.status);
+  const pct     = recCompletion(rec);
+  const summary = recSummary(rec);
+  const dudosos = (rec.dudosos?.length || 0) + (rec.sinEvidencia?.length || 0);
+
+  return (
+    <button type="button" onClick={onClick}
+      onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
+      style={{ width:'100%', display:'flex', alignItems:'center', gap:12, textAlign:'left',
+        padding:'9px 12px', minHeight:44, cursor:'pointer', fontFamily:'inherit',
+        background: hov ? 'var(--surface-2)' : 'transparent',
+        border:'none', borderBottom:'1px solid var(--border-subtle)',
+        borderLeft:`2px solid ${isError ? 'var(--danger)' : 'transparent'}`,
+        transition:'background 0.1s' }}>
+
+      <span style={{ width:8, height:8, borderRadius:'50%', flexShrink:0,
+        background: isError ? 'var(--danger)' : isProc ? 'var(--accent)' : 'var(--warn-dot)' }}/>
+
+      <span style={{ flex:'0 0 190px', fontSize:14, fontWeight:640, color:'var(--text)',
+        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{name}</span>
+
+      <span style={{ flex:1, minWidth:0, fontSize:13, color:'var(--muted)',
+        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+        {isProc ? 'Procesando…' : isError ? (rec.error || 'No se pudo procesar') : summary}
+      </span>
+
+      {dudosos > 0 && !isProc && !isError && (
+        <span title={`${dudosos} campo(s) que revisar primero`}
+          style={{ flexShrink:0, display:'inline-flex', alignItems:'center', gap:4, padding:'1px 7px',
+            borderRadius:999, fontSize:11, fontWeight:700, color:'var(--warn)',
+            background:'var(--warn-bg)', border:'1px solid var(--warn-border)' }}>
+          {dudosos} dudoso{dudosos>1?'s':''}
+        </span>
+      )}
+
+      <span style={{ flexShrink:0, width:52, textAlign:'right',
+        fontFamily:"'JetBrains Mono',monospace", fontSize:11.5,
+        color: pct >= 80 ? 'var(--ok)' : 'var(--muted)' }}>
+        {isProc || isError ? '—' : pct + '%'}
+      </span>
+
+      <span style={{ flexShrink:0, width:56, textAlign:'right',
+        fontFamily:"'JetBrains Mono',monospace", fontSize:11.5, color:'var(--faint)' }}>
+        {fmtClock(rec.createdAt)}
+      </span>
+    </button>
+  );
+}
+
+export function ListingView({ recs, tab, setTab, sort, setSort, onSelect, loadError, onRetry }) {
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
 
@@ -137,6 +194,10 @@ export function ListingView({ recs, tab, setTab, sort, setSort, onSelect }) {
     if (q) list = list.filter(r => recName(r).toLowerCase().includes(q) || (recSummary(r)||'').toLowerCase().includes(q));
     return [...list].sort((a,b) => sort==='newest' ? b.createdAt-a.createdAt : a.createdAt-b.createdAt);
   }, [recs, tab, q, sort]);
+
+  // "Por revisar" es la cola del día: densidad. El resto (en proceso, revisadas) son
+  // grupos chicos donde una card se lee mejor.
+  const denso = tab === 'pending';
 
   // Agrupar por día (solo sin búsqueda activa)
   const groups = useMemo(() => {
@@ -223,29 +284,53 @@ export function ListingView({ recs, tab, setTab, sort, setSort, onSelect }) {
 
       {/* Body */}
       <div className="mr-scroll" style={{ flex:1, overflowY:'auto', padding:'24px 28px' }}>
-        {items.length === 0 ? (
+        {/* Un servidor caído NO es "no hay consultas". Antes el médico leía "Sin consultas en
+            esta sección" y cerraba la laptop creyendo que había terminado el día, con las
+            historias sin firmar. Un vacío solo es legítimo si la carga tuvo éxito. */}
+        {loadError ? (
+          <div style={{ textAlign:'center', paddingTop:72 }}>
+            <div style={{ width:48, height:48, borderRadius:12, background:'var(--danger-bg)',
+              color:'var(--danger)', display:'flex', alignItems:'center', justifyContent:'center',
+              margin:'0 auto 14px' }}>
+              <Icon name="warn" size={24}/>
+            </div>
+            <div style={{ fontSize:15, fontWeight:700, marginBottom:6 }}>No se pudieron cargar las consultas</div>
+            <div style={{ fontSize:13.5, color:'var(--muted)', lineHeight:1.5, maxWidth:380,
+              margin:'0 auto 18px' }}>
+              No sabemos si tienes pendientes. Revisa que el servidor esté encendido y vuelve a intentar.
+            </div>
+            <Btn icon="refresh" onClick={onRetry}>Reintentar</Btn>
+          </div>
+        ) : items.length === 0 ? (
           <div style={{ textAlign:'center', paddingTop:80, color:'var(--faint)' }}>
             <Icon name="clipboard" size={32} style={{ marginBottom:12, opacity:0.35 }}/>
             <div style={{ fontSize:14, fontWeight:600, color:'var(--muted)', marginBottom:6 }}>
-              {q ? `Sin resultados para "${query}"` : 'Sin consultas en esta sección'}
+              {q ? `Sin resultados para "${query}"` : 'Aún no hay consultas'}
             </div>
-            {q && (
+            {q ? (
               <button type="button" onClick={()=>setQuery('')}
-                style={{ fontSize:12.5, color:'var(--accent)', background:'none', border:'none',
+                style={{ fontSize:12.5, color:'var(--accent-strong)', background:'none', border:'none',
                   cursor:'pointer', fontFamily:'inherit', textDecoration:'underline' }}>
                 Limpiar búsqueda
               </button>
+            ) : (
+              // El acto que corresponde no está acá: está en el celular.
+              <div style={{ fontSize:13, color:'var(--muted)', lineHeight:1.55, maxWidth:320, margin:'0 auto' }}>
+                Abre MedRecord en tu celular para grabar la primera consulta.
+              </div>
             )}
           </div>
         ) : groups ? (
           groups.map(g => (
             <div key={g.key} style={{ marginBottom:24 }}>
               <DayHeader label={g.label} count={g.items.length}/>
-              <div style={GRID}>
-                {g.items.map(r => <RecCard key={r.id} rec={r} onClick={()=>onSelect(r.id)}/>)}
-              </div>
+              {denso
+                ? <div>{g.items.map(r => <RecRow key={r.id} rec={r} onClick={()=>onSelect(r.id)}/>)}</div>
+                : <div style={GRID}>{g.items.map(r => <RecCard key={r.id} rec={r} onClick={()=>onSelect(r.id)}/>)}</div>}
             </div>
           ))
+        ) : denso ? (
+          <div>{items.map(r => <RecRow key={r.id} rec={r} onClick={()=>onSelect(r.id)}/>)}</div>
         ) : (
           <div style={GRID}>
             {items.map(r => <RecCard key={r.id} rec={r} onClick={()=>onSelect(r.id)} showDate/>)}

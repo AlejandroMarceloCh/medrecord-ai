@@ -9,26 +9,42 @@ import { SettingsView }    from './settings.jsx';
 import { ListingView }     from './listing.jsx';
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
-function Toast({ toast, onDismiss, onOpen }) {
-  useEffect(() => { const id=setTimeout(onDismiss,6000); return ()=>clearTimeout(id); }, []);
+function Toast({ toast, onDismiss, onOpen, onRetry }) {
   const err = toast.kind === 'error';
+  // Los errores NO se auto-descartan: si el médico no estaba mirando, el aviso de que una
+  // consulta falló se perdía para siempre. Los éxitos sí, a los 4 s.
+  useEffect(() => {
+    if (err) return;
+    const id = setTimeout(onDismiss, 4000);
+    return () => clearTimeout(id);
+  }, [err]);
+
   return (
-    <div style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 16px', marginBottom:8,
+    <div role="status" aria-live="polite"
+      style={{ display:'flex', alignItems:'flex-start', gap:12, padding:'12px 16px', marginBottom:8,
       borderRadius:12, background:err?'var(--danger-bg)':'var(--ok-bg)',
       border:`1px solid ${err?'var(--danger-border)':'var(--ok-border)'}`,
-      boxShadow:'0 4px 24px rgba(28,25,23,0.14)', minWidth:280, maxWidth:360,
+      boxShadow:'0 4px 24px rgba(28,25,23,0.14)', minWidth:300, maxWidth:380,
       animation:'mr-slide-right 0.25s ease-out' }}>
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ fontSize:13.5, fontWeight:650, color:err?'var(--danger)':'var(--ok)' }}>
-          {err ? 'No se pudo transcribir' : 'Consulta lista para revisar'}
+          {toast.title || (err ? 'No se pudo procesar la consulta' : 'Consulta lista para revisar')}
         </div>
-        <div style={{ fontSize:12.5, color:'var(--muted)', marginTop:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+        <div style={{ fontSize:12.5, color:'var(--muted)', marginTop:2, lineHeight:1.45 }}>
           {recName(toast.rec)}
+          {/* La CAUSA. Antes el toast decía solo "no se pudo transcribir": sin motivo y sin
+              salida, el médico se quedaba mirando una tarjeta roja sin saber qué hacer. */}
+          {toast.msg ? <><br/><span style={{ color:'var(--danger)' }}>{toast.msg}</span></> : null}
         </div>
+        {err && onRetry && (
+          <div style={{ marginTop:8 }}>
+            <Btn variant="soft" size="sm" icon="refresh" onClick={()=>onRetry(toast.rec)}>Reintentar</Btn>
+          </div>
+        )}
       </div>
       {!err && <Btn variant="primary" size="sm" onClick={onOpen}>Abrir</Btn>}
-      <button type="button" onClick={onDismiss}
-        style={{ background:'none', border:'none', cursor:'pointer', color:'var(--faint)', padding:4, display:'flex', flexShrink:0 }}>
+      <button type="button" onClick={onDismiss} aria-label="Descartar aviso"
+        style={{ background:'none', border:'none', cursor:'pointer', color:'var(--muted)', padding:4, display:'flex', flexShrink:0 }}>
         <Icon name="x" size={13}/>
       </button>
     </div>
@@ -65,7 +81,7 @@ function AllDoneScreen({ reviewedCount, processingCount, pastPendingCount, onHis
           <button type="button" onClick={onHistorial} style={ghostBtn}
             onMouseEnter={e=>e.currentTarget.style.color='var(--text)'}
             onMouseLeave={e=>e.currentTarget.style.color='var(--muted)'}>
-            Historial ({reviewedCount} revisada{reviewedCount>1?'s':''})
+            Ver revisadas ({reviewedCount})
           </button>
         )}
       </div>
@@ -204,7 +220,7 @@ function WorkbenchBar({ rec, reviewedCount, onBack, queuePos, queueLen }) {
         onMouseEnter={e=>e.currentTarget.style.color='var(--text)'}
         onMouseLeave={e=>e.currentTarget.style.color='var(--muted)'}>
         <Icon name="chevL" size={15} stroke={2.2}/>
-        Historial{reviewedCount > 0 ? ` (${reviewedCount})` : ''}
+        Revisadas{reviewedCount > 0 ? ` (${reviewedCount})` : ''}
       </button>
 
       <div style={{ width:1, height:20, background:'var(--border-subtle)', flexShrink:0 }}/>
@@ -250,6 +266,7 @@ export function WebRoot() {
   const [loading,    setLoading]    = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [toasts,     setToasts]     = useState([]);
+  const pushToast = (t) => setToasts(ts => [...ts, { id: Math.random().toString(36).slice(2), ...t }]);
   const [activeTab,   setActiveTab]   = useState('pending');
   const [listSort,    setListSort]    = useState('newest');
   const [hovFieldId,  setHovFieldId]  = useState(null);
@@ -346,15 +363,37 @@ export function WebRoot() {
   };
 
   const handleDelete = async rec => {
-    if (!confirm(`¿Descartar la grabación de ${recName(rec)}? Se borra el audio y no se puede deshacer.`)) return;
-    removeRec(rec.id);
-    setSelectedId(null);
-    setView('listing');
-    try { await apiFetch(`/api/recordings/${rec.id}`, { method:'DELETE' }); } catch {}
+    if (!confirm(`¿Descartar la consulta de ${recName(rec)}?\n\nSe borra el audio y la transcripción. No se puede deshacer.\n\n(Una historia ya firmada no se puede borrar.)`)) return;
+    try {
+      const r = await apiFetch(`/api/recordings/${rec.id}`, { method:'DELETE' });
+      if (!r.ok) {
+        // 409 = historia firmada: tiene valor legal y no se destruye.
+        const d = await r.json().catch(() => ({}));
+        pushToast({ kind:'error', rec, msg: d.error || 'No se pudo descartar la consulta.' });
+        return;
+      }
+      // Borrado optimista SOLO tras confirmar: antes se quitaba de la lista primero y, si el
+      // DELETE fallaba, la consulta reaparecía al siguiente refresco como si nada.
+      removeRec(rec.id);
+      setSelectedId(null);
+      setView('listing');
+    } catch {
+      pushToast({ kind:'error', rec, msg:'No se pudo conectar con el servidor. Revisa la conexión.' });
+    }
   };
 
   const handleRetry = async rec => {
-    try { await apiFetch(`/api/recordings/${rec.id}/retry`, { method:'POST' }); } catch {}
+    try {
+      const r = await apiFetch(`/api/recordings/${rec.id}/retry`, { method:'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        pushToast({ kind:'error', rec, msg: d.error || 'No se pudo reintentar.' });
+      }
+    } catch {
+      // Antes esto era un catch vacío: el clic no hacía absolutamente nada y el médico
+      // volvía a apretar cinco veces sin entender por qué no pasaba nada.
+      pushToast({ kind:'error', rec, msg:'No se pudo conectar con el servidor. Revisa la conexión.' });
+    }
   };
 
   const handleCfg  = newCfg  => { setCfg(newCfg);  saveConfig(newCfg); };
@@ -373,7 +412,7 @@ export function WebRoot() {
 
   // No cambiar de paciente con edits sin guardar sin avisar (se perderían en silencio).
   const confirmLeave = () => !dirtyRef.current ||
-    window.confirm('Tienes cambios sin guardar en esta consulta. ¿Continuar sin guardar?');
+    window.confirm('Tienes cambios sin guardar en esta consulta.\n\nAceptar = salir sin guardar.\nCancelar = quedarte y guardar.');
   const onPrev = () => {
     if (!confirmLeave()) return;
     const idx = activeQueue.findIndex(r=>r.id===selectedId);
@@ -392,7 +431,7 @@ export function WebRoot() {
       if (e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
       if (e.key==='j') onNext();
       if (e.key==='k') onPrev();
-      if (e.key==='Escape') { setSelectedId(null); setView('workbench'); }
+      if (e.key==='Escape') onBack();   // mismo destino que el botón, y pasa por confirmLeave
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -445,7 +484,7 @@ export function WebRoot() {
           onHistorial={()=>{ setActiveTab('reviewed'); setView('listing'); }}/>
 
       ) : (
-        <ListingView
+        <ListingView loadError={loadError} onRetry={()=>refetch.current()}
           recs={recs} tab={activeTab} setTab={setActiveTab}
           sort={listSort} setSort={setListSort}
           onSelect={handleSelect}/>
@@ -456,7 +495,8 @@ export function WebRoot() {
         {toasts.map(tt => (
           <Toast key={tt.id} toast={tt}
             onDismiss={()=>setToasts(ts=>ts.filter(x=>x.id!==tt.id))}
-            onOpen={()=>{ handleSelect(tt.rec.id); setToasts(ts=>ts.filter(x=>x.id!==tt.id)); }}/>
+            onOpen={()=>{ handleSelect(tt.rec.id); setToasts(ts=>ts.filter(x=>x.id!==tt.id)); }}
+            onRetry={(rec)=>{ handleRetry(rec); setToasts(ts=>ts.filter(x=>x.id!==tt.id)); }}/>
         ))}
       </div>
     </div>

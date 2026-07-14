@@ -598,9 +598,18 @@ function flattenFields(f) {
 }
 
 // Claves de campos que la IA pobló (no vacíos). Son los que el médico debe confirmar.
+// El nombre, el documento y la fecha NO los generó la IA: los inyecta el registro del médico
+// y la app. Contarlos como "poblados por la IA" era un callejón sin salida: el nombre se
+// edita en el H1 del visor, no tiene su propio ClinicalField, así que NO TIENE botón
+// "Confirmar" — el contador se quedaba en "Confirma 1" para siempre y el médico NO PODÍA
+// FIRMAR NUNCA. El producto quedaba inutilizable y ningún test lo veía.
+const NO_LOS_GENERA_LA_IA = new Set([
+  'filiacion.nombre', 'filiacion.documento', 'filiacion.fecha_consulta',
+]);
+
 function aiPopulatedKeys(fieldsIa) {
   return Object.entries(flattenFields(fieldsIa))
-    .filter(([, v]) => String(v == null ? '' : v).trim())
+    .filter(([k, v]) => String(v == null ? '' : v).trim() && !NO_LOS_GENERA_LA_IA.has(k))
     .map(([k]) => k);
 }
 

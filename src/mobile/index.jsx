@@ -10,19 +10,22 @@ import { Btn, Icon, Spinner } from './ui.jsx';
 // pasaba 1/9 sin que nadie lo notara, porque no corría en `npm test`. Ahora sí corre.
 if (typeof window !== 'undefined') window.MRQueue = MRQueue;
 
+// Clinical Precision, la misma dirección que la web: crema cálido + teal. El móvil se había
+// quedado en índigo/violeta sobre gris frío — dos productos distintos, y el violeta es
+// literalmente el acento por defecto que hay que evitar.
 function computeTheme() {
-  const a = 'oklch(0.52 0.20 277)', strong = 'oklch(0.46 0.20 277)', h = 270, c = 0.008;
-  const L = (l, ch = c) => `oklch(${l} ${ch} ${h})`;
+  const a = '#0D9488', strong = '#0F766E';
   return {
     '--accent': a, '--accent-strong': strong,
     '--radius': '8px', '--radius-lg': '11px', '--fs': '15.5px',
-    '--bg': L(0.975), '--surface': '#ffffff', '--surface-2': L(0.982), '--surface-3': L(0.965),
-    '--border': L(0.915, c * 1.2), '--border-2': L(0.86, c * 1.4),
-    '--text': L(0.27, c * 2.4), '--muted': L(0.5, c * 1.8), '--faint': L(0.62, c * 1.4),
-    '--ok': 'oklch(0.55 0.13 155)', '--warn': 'oklch(0.62 0.13 65)', '--danger': 'oklch(0.55 0.20 25)',
+    '--bg': '#F8F6F1',                                  // crema, no gris azulado
+    '--surface': '#FFFFFF', '--surface-2': '#FCFBF8', '--surface-3': '#F3F1EC',
+    '--border': '#E7E5E0', '--border-2': '#D6D3CD',
+    '--text': '#1C1917', '--muted': '#57534E', '--faint': '#78716C',   // 4.8:1, legible
+    '--ok': '#15803D', '--warn': '#B45309', '--danger': '#B91C1C',
     '--on-accent': '#ffffff',
-    '--accent-soft': `color-mix(in oklch, ${a} 11%, #ffffff)`,
-    '--accent-line': `color-mix(in oklch, ${a} 28%, #ffffff)`,
+    '--accent-soft': 'rgba(13,148,136,0.10)',
+    '--accent-line': 'rgba(13,148,136,0.26)',
   };
 }
 

@@ -68,7 +68,8 @@ export function ClinicalField({ id, label, value, long, filterMode, onChange, on
         </div>
       )}
       <Input value={value||''} onChange={e=>onChange(id,e.target.value)}
-        onFocus={()=>setFocus(true)} onBlur={()=>setFocus(false)}
+        onFocus={()=>{ setFocus(true); if (hasSource) onHover?.(id); }}
+        onBlur={()=>{ setFocus(false); if (hasSource) onHover?.(null); }}
         placeholder={empty?'Sin datos…':''}
         rows={long?Math.max(2,Math.ceil((String(value||'').length||20)/72)):undefined}
         style={{ width:'100%', border:'none', outline:'none', background:'transparent', resize:'none',
@@ -108,7 +109,7 @@ export function FieldGroup({ icon, title, children, emptyCount, filterMode }) {
 }
 
 // ── AiBanner ─────────────────────────────────────────────────────────────────
-export function AiBanner({ rec, emptyCount, onReextract, reextracting, pendingConfirm }) {
+export function AiBanner({ rec, emptyCount, onReextract, reextracting, pendingConfirm, enBloque = 0, onConfirmarBloque, riesgosos = 0 }) {
   let bg, bd, fg, msg, spin=false, action=null;
   if (rec.status==='filling'||reextracting) {
     bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
@@ -127,8 +128,19 @@ export function AiBanner({ rec, emptyCount, onReextract, reextracting, pendingCo
   } else if (rec.fields) {
     bg='var(--accent-soft)'; bd='var(--accent-line)'; fg='var(--accent-strong)';
     msg = pendingConfirm > 0
-      ? `${pendingConfirm} campo${pendingConfirm>1?'s':''} de IA por confirmar antes de firmar.`
+      ? (riesgosos > 0
+          ? `${riesgosos} campo${riesgosos>1?'s':''} clínico${riesgosos>1?'s':''} por confirmar (diagnóstico, plan, vitales): revísalo${riesgosos>1?'s':''} contra la transcripción.`
+          : `${pendingConfirm} campo${pendingConfirm>1?'s':''} por confirmar antes de firmar.`)
       : (emptyCount>0 ? `Campos pre-llenados por IA. ${emptyCount} por completar.` : 'Campos de IA confirmados. Puedes firmar.');
+    // Los campos SIN riesgo clínico y CON evidencia verificada se confirman en bloque. Los
+    // de riesgo (diagnóstico, plan, signos vitales) siguen exigiendo una mirada cada uno.
+    if (enBloque > 0) {
+      action = (
+        <Btn variant="soft" size="sm" icon="check" onClick={onConfirmarBloque}>
+          Confirmar {enBloque} con evidencia
+        </Btn>
+      );
+    }
   } else {
     bg='var(--warn-bg)'; bd='var(--warn-border)'; fg='var(--warn)';
     msg='Sin autollenado disponible. Completa los campos desde la transcripción.';
@@ -196,6 +208,7 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
 
   const [vals,   setVals]   = useState(()=>flat(rec?.fields));
   const [save,   setSave]   = useState('idle');
+  const [saveError, setSaveError] = useState('');
   const [dirty,  setDirty]  = useState(false);
   const [onlyEmpty, setOnlyEmpty] = useState(false);
   const [reextracting, setReextracting] = useState(false);
@@ -205,7 +218,13 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
   // Campos que la IA pobló (no vacíos): son los que el médico debe confirmar o editar.
   const iaFlat = useMemo(()=>flat(rec?.fields_ia), [rec?.fields_ia]);
   const isAi = (id) => !!String(iaFlat[id]||'').trim();
-  const aiIds = useMemo(()=>Object.keys(iaFlat).filter(k=>String(iaFlat[k]||'').trim()), [iaFlat]);
+  // El nombre, el documento y la fecha los pone el registro/la app, no la IA. Y el nombre
+  // se edita en el H1, no tiene ClinicalField: si contara como "de IA", no habría forma de
+  // confirmarlo y el médico jamás podría firmar.
+  const NO_ES_IA = new Set(['filiacion.nombre','filiacion.documento','filiacion.fecha_consulta']);
+  const aiIds = useMemo(
+    ()=>Object.keys(iaFlat).filter(k=>String(iaFlat[k]||'').trim() && !NO_ES_IA.has(k)),
+    [iaFlat]);
   const confirmField = (id) => setConfirmed(s => { const n = new Set(s); n.add(id); return n; });
 
   // Señal de confianza del backend: campos donde las dos pasadas del LLM no coincidieron
@@ -265,6 +284,22 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
   // Campos de IA todavía sin confirmar ni editar → bloquean la firma.
   const pendingConfirm = useMemo(()=>aiIds.filter(id=>!confirmed.has(id)), [aiIds, confirmed]);
 
+  // Riesgo clínico: lo que puede dañar al paciente si está mal. Nunca se confirma en bloque.
+  const esRiesgoso = (id) =>
+    id.startsWith('impresion_diagnostica.') || id.startsWith('plan.') ||
+    id.startsWith('examen_fisico.') || dudosos.has(id) || sinEvidencia.has(id);
+
+  // Confirmables en bloque: sin riesgo clínico Y con su cita verificada en el audio.
+  const enBloque = useMemo(
+    () => pendingConfirm.filter(id => !esRiesgoso(id) && !!sources[id]),
+    [pendingConfirm, sources, dudosos, sinEvidencia]);
+  const confirmarBloque = () => setConfirmed(s => {
+    const n = new Set(s);
+    for (const id of enBloque) n.add(id);
+    return n;
+  });
+  const riesgososPendientes = pendingConfirm.filter(esRiesgoso);
+
   const doSave = async (markReviewed=false) => {
     setSave('saving');
     try {
@@ -276,12 +311,30 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
         ...(markReviewed ? { reviewed:true } : {}),
       };
       const r = await apiFetch(`/api/recordings/${rec.id}/fields`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-      if (!r.ok) throw new Error('save');
+      if (!r.ok) {
+        // Un 409 de versión y un fallo de red se veían IDÉNTICOS ("No se pudo guardar"), y
+        // piden cosas distintas del médico: uno recargar, el otro reintentar.
+        const d = await r.json().catch(() => ({}));
+        setSave('error');
+        setSaveError(
+          r.status === 409 && d.currentVersion !== undefined
+            ? 'Otro dispositivo modificó esta consulta. Recarga para ver la versión actual.'
+          : r.status === 409 ? (d.error || 'La consulta ya está firmada.')
+          : r.status === 400 ? (d.error || 'Faltan datos para guardar.')
+          : r.status === 500 ? 'El servidor no pudo guardar en disco. No se firmó nada.'
+          : 'No se pudo guardar. Intenta de nuevo.'
+        );
+        return null;
+      }
       const updated = await r.json();
-      setSave('saved'); setDirty(false);
+      setSave('saved'); setDirty(false); setSaveError('');
       onSaved?.(updated);
       return updated;
-    } catch { setSave('error'); return null; }
+    } catch {
+      setSave('error');
+      setSaveError('No se pudo conectar con el servidor. Revisa la conexión e intenta de nuevo.');
+      return null;
+    }
   };
 
   const doSign = async () => {
@@ -368,7 +421,10 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
               )}
             </div>
           ) : (<>
-            {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract} reextracting={reextracting} pendingConfirm={pendingConfirm.length}/>}
+            {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract}
+              reextracting={reextracting} pendingConfirm={pendingConfirm.length}
+              enBloque={enBloque.length} onConfirmarBloque={confirmarBloque}
+              riesgosos={riesgososPendientes.length}/>}
 
             {/* Lo dudoso, arriba. El médico revisa 12 historias: tiene que ver de un vistazo
                 qué mirar primero, no descubrirlo bajando por un scroll de 22 campos. */}
@@ -430,6 +486,16 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
 
         <IconBtn name="chevL" onClick={onPrev} disabled={reviewPos<=1} title="Anterior (K)"/>
 
+        {/* Descartar. `onDelete` llevaba siendo una prop MUERTA desde siempre: no había un
+            solo botón en toda la app para borrar una consulta. Si el paciente retiraba el
+            consentimiento, o se grababa al paciente equivocado, el audio se quedaba en el
+            servidor para siempre. Una historia ya firmada no se puede borrar (el server
+            devuelve 409): tiene valor legal. */}
+        {!isReviewed && (
+          <IconBtn name="trash" onClick={()=>onDelete?.(rec)}
+            title="Descartar esta consulta (borra el audio)"/>
+        )}
+
         {!isProc && (
           <button type="button" onClick={()=>setOnlyEmpty(v=>!v)}
             style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'4px 10px', borderRadius:6,
@@ -448,7 +514,10 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
         <div style={{ flex:1 }}/>
 
         {save==='error' && (
-          <span style={{ fontSize:12.5, color:'var(--danger)', fontWeight:600 }}>No se pudo guardar</span>
+          <span role="alert" style={{ fontSize:12.5, color:'var(--danger)', fontWeight:600, maxWidth:420,
+            lineHeight:1.35 }}>
+            {saveError || 'No se pudo guardar.'}
+          </span>
         )}
         {!isProc && (<>
           {dirty && (

@@ -58,6 +58,11 @@ La lista que el Agente A verifica al cerrar **cada** sprint. Crece; nunca se pod
 38. **[S20]** Un campo dudoso llega vacío, pero `fields_ia` conserva lo que la IA propuso: hay que confirmarlo igual.
 39. **[S20]** El ámbar es la excepción, no la norma: una redacción distinta del mismo hecho no se marca dudosa.
 40. **[S20]** `npm run build` regenera también los bundles de dev: la UI nunca se queda atrás en silencio.
+41. **[S21]** Un listado vacío solo se muestra si la carga fue exitosa y devolvió cero.
+42. **[S21]** El médico SIEMPRE puede llegar a firmar: no hay campos por confirmar sin botón.
+43. **[S21]** Existe una salida destructiva: se puede descartar una consulta sin firmar.
+44. **[S21]** Confirmar se ordena por riesgo: lo clínico va uno a uno, nunca en bloque.
+45. **[S21]** Contraste ≥4.5:1 en todos los tokens de texto.
 
 ---
 
@@ -586,3 +591,88 @@ que es el precio de la señal de confianza.
 39. El ámbar es la excepción, no la norma: una redacción distinta del mismo hecho no se marca
     dudosa.
 40. `npm run build` regenera también los bundles de dev: la UI nunca se queda atrás en silencio.
+
+## Sprint 21 — Revisar toma menos de 60 segundos · CERRADO 2026-07-13
+
+**Goal:** El médico revisa y firma una consulta sin levantarse de la silla, con el paciente
+todavía vistiéndose.
+
+**Veredicto: CUMPLIDO** (tras cerrar los dos bugs que hicieron que el verificador dictara
+"CUMPLIDO SOLO EN EL TEST", y uno de ellos dejaba el producto **inutilizable**).
+
+### Qué cambió
+
+- **Un servidor caído ya no se ve como "no hay consultas".** Antes el médico leía *"Sin
+  consultas en esta sección"*, cerraba la laptop creyendo que había terminado el día, y dejaba
+  las historias sin firmar. Un vacío solo es legítimo si la carga tuvo éxito.
+- **Tabla densa en "Por revisar".** Era la decisión tomada y nunca llegó al código: con cards
+  de 280 px caben ~6 pacientes por pantalla; con filas de 44 px, las 8 del día completo
+  (medido). Con 12-30 consultas diarias, esa es la diferencia entre ver el día de un vistazo o
+  descubrirlo bajando por un scroll.
+- **La evidencia aparece con el teclado.** Solo se disparaba con `onMouseEnter`: el médico que
+  tabula entre campos —lo natural al revisar 12 historias— **nunca la veía**. La feature que
+  justifica confiar en la IA funcionaba únicamente si movías el mouse.
+- **Contraste.** `--faint` estaba en **2.52:1** y etiqueta *cada* campo clínico y el DNI del
+  paciente, a 10.5 px, en una pantalla de consultorio con reflejo. Ahora 4.80:1. `--ok` de
+  3.30 a 5.02.
+- **`Esc` ya no descarta ediciones en silencio.** Era el único camino de salida que no pasaba
+  por la confirmación: el médico corregía el diagnóstico, apretaba Esc por reflejo, y perdía
+  la corrección sin un aviso.
+- **Los botones avisan cuando fallan.** `handleRetry` tenía un `catch {}` vacío: el clic era un
+  **no-op absoluto** y el médico volvía a apretar cinco veces sin entender nada. Los toasts de
+  error llevan la causa y un botón, y ya no se auto-descartan.
+- **Un 409 ya no se confunde con un fallo de red.** Ambos decían "No se pudo guardar", y piden
+  cosas distintas: uno recargar, el otro reintentar.
+- **El móvil usa la paleta de la web.** Seguía en índigo/violeta sobre gris frío — dos productos
+  distintos, y el violeta es literalmente el acento por defecto que hay que evitar. Los dos
+  manifests también.
+
+### Confirmar, ordenado por riesgo
+
+El cuello de botella real del goal: confirmar **cada** campo de IA son ~13 clics por consulta ×
+12 pacientes = **~150 clics al día**, y el médico aprende a clicar sin leer. Eso es el
+*confirmation theater*, y es lo que mata al producto.
+
+La salida **no** es un "Confirmar todo" (destriparía el human-in-the-loop), sino ordenar por
+riesgo: lo administrativo **con evidencia verificada en el audio** se confirma en bloque; el
+**diagnóstico, el plan y los signos vitales** siguen exigiendo una mirada cada uno.
+
+**Medido con Playwright: de 13 clics a 6.** Un clic confirma los 8 administrativos, y los 4 de
+riesgo clínico van uno a uno.
+
+### Tests
+
+- `test/sprint21_revision.mjs` → **12/12**, en Chromium real.
+- Suite completa → **151/151, 0 fallas**.
+
+### QA (protocolo anticagadas)
+
+- **El test atrapó un `Btn is not defined`** en `listing.jsx` que dejaba **la app entera en
+  pantalla blanca**. El mismo tipo de bug que ya llegó a producción una vez (ver `AUDIT_CODEX`).
+  Sin el test, esto lo descubría el médico.
+- **Agente C (verificador): "CUMPLIDO SOLO EN EL TEST"**, y encontró el bug que hacía el
+  producto **inutilizable**: `filiacion.nombre` contaba como campo de IA por confirmar, pero se
+  edita en el H1 del visor y **no tiene botón "Confirmar"**. El contador se quedaba en
+  *"Confirma 1"* para siempre y **el médico no podía firmar nunca**. La causa raíz: el nombre y
+  el DNI **no los genera la IA**, los inyecta el registro — nunca debieron contar.
+  También: **no existía ningún botón para descartar una consulta**. `onDelete` llevaba siendo
+  una prop muerta desde siempre. Si el paciente retiraba el consentimiento, o se grababa al
+  paciente equivocado, el audio se quedaba en el servidor para siempre.
+- **Agente A (regresión):** 40/40 invariantes intactas. Señaló que los toasts de error no tienen
+  tope: con 12 consultas fallidas se acumulan 12. No bloquea, queda anotado.
+
+### Deuda abierta
+
+- **Los toasts de error no se agrupan ni tienen límite.** → S22.
+- El goal habla de **60 segundos** y lo que se puede medir son los clics (6). El tiempo de
+  lectura real solo lo dirá el piloto. → S22 lo instrumenta.
+- La deuda de S17-S20 sigue: consulta real de 20-30 min, móvil en un iPhone real, sinónimos en
+  el detector de dudosos, rotación del audit log.
+
+### Invariantes nuevas para el Agente A
+
+41. Un listado vacío solo se muestra si la carga fue exitosa y devolvió cero.
+42. El médico SIEMPRE puede llegar a firmar: no hay campos por confirmar sin botón.
+43. Existe una salida destructiva: se puede descartar una consulta sin firmar.
+44. Confirmar se ordena por riesgo: lo clínico va uno a uno, nunca en bloque.
+45. Contraste ≥4.5:1 en todos los tokens de texto.
