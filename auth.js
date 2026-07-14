@@ -212,8 +212,24 @@ function hashEntrada(entrada) {
   return crypto.createHash('sha256').update(JSON.stringify(entrada)).digest('hex').slice(0, 16);
 }
 
+const AUDIT_MAX_BYTES = Number(process.env.MEDRECORD_AUDIT_MAX_BYTES || 5 * 1024 * 1024);
+
+// Rota el log cuando crece demasiado. La cadena de hashes se conserva: la primera entrada del
+// log nuevo apunta a la última del viejo, así que el encadenado sobrevive a la rotación y una
+// auditoría puede seguir el rastro completo.
+function rotarSiHaceFalta() {
+  try {
+    const st = fs.statSync(auditFile);
+    if (st.size < AUDIT_MAX_BYTES) return;
+    const sello = new Date().toISOString().slice(0, 10);
+    fs.renameSync(auditFile, `${auditFile}.${sello}`);
+    console.log('  Audit log rotado (superó ' + Math.round(AUDIT_MAX_BYTES / 1024 / 1024) + ' MB)');
+  } catch { /* no existe todavía */ }
+}
+
 function audit(entry) {
   try {
+    rotarSiHaceFalta();
     if (ultimoHash === null) {
       const previas = readAudit();
       ultimoHash = previas.length ? previas[previas.length - 1].h : '';
@@ -232,18 +248,62 @@ function readAudit() {
 }
 
 // ¿La cadena está intacta? Devuelve la primera entrada adulterada, si la hay.
+//
+// El punto de partida es el `prev` de la PRIMERA entrada, no una cadena vacía: tras una
+// rotación, el log nuevo empieza apuntando a la última entrada del viejo. Verificar contra ''
+// habría reportado como adulterado un log perfectamente íntegro — un falso positivo en el
+// mecanismo de integridad es casi tan malo como un falso negativo: enseña a ignorarlo.
+//
+// La continuidad ENTRE archivos (que el `prev` de la primera fila coincida con la última del
+// log rotado) se comprueba con `rotados`, si están.
 function verifyAudit() {
   const filas = readAudit();
-  let prev = '';
+  if (!filas.length) return { valid: true, total: 0 };
+
+  const arranque = filas[0].prev ?? '';
+
+  // ¿De dónde viene la cadena? Si la primera fila apunta a algo, ese algo tiene que existir:
+  // o es el final del log rotado anterior, o alguien BORRÓ las primeras entradas.
+  //
+  // Arrancar la verificación desde `filas[0].prev` sin más habría dejado ese agujero abierto:
+  // un atacante recorta el principio del log —justo donde está el rastro que quiere borrar— y
+  // el resto de la cadena sigue cuadrando.
+  let origen = 'inicio';
+  if (arranque !== '') {
+    const rotados = (() => {
+      try {
+        return fs.readdirSync(path.dirname(auditFile))
+          .filter(f => f.startsWith(path.basename(auditFile) + '.'))
+          .sort();
+      } catch { return []; }
+    })();
+    const empalma = rotados.some(nombre => {
+      try {
+        const lineas = fs.readFileSync(path.join(path.dirname(auditFile), nombre), 'utf8')
+          .trim().split('\n').filter(Boolean);
+        const ultima = JSON.parse(lineas[lineas.length - 1]);
+        return ultima.h === arranque;
+      } catch { return false; }
+    });
+    if (!empalma) {
+      return {
+        valid: false, total: filas.length, brokenAt: 0,
+        motivo: 'la primera entrada apunta a un eslabón que no existe: se borró el principio del log',
+      };
+    }
+    origen = 'rotacion';
+  }
+
+  let prev = arranque;
   for (let i = 0; i < filas.length; i++) {
     const f = filas[i];
     const { h, ...sinHash } = f;
     if (f.prev !== prev || hashEntrada(sinHash) !== h) {
-      return { valid: false, brokenAt: i, total: filas.length };
+      return { valid: false, brokenAt: i, total: filas.length, motivo: 'entrada adulterada' };
     }
     prev = h;
   }
-  return { valid: true, total: filas.length };
+  return { valid: true, total: filas.length, desdeRotacion: origen === 'rotacion' };
 }
 
 module.exports = {

@@ -63,6 +63,11 @@ La lista que el Agente A verifica al cerrar **cada** sprint. Crece; nunca se pod
 43. **[S21]** Existe una salida destructiva: se puede descartar una consulta sin firmar.
 44. **[S21]** Confirmar se ordena por riesgo: lo clínico va uno a uno, nunca en bloque.
 45. **[S21]** Contraste ≥4.5:1 en todos los tokens de texto.
+46. **[S22]** El server resucita solo tras caerse, sin que nadie toque nada.
+47. **[S22]** El backup se verifica a sí mismo: restaura y descifra, o falla ruidosamente.
+48. **[S22]** Borrar el principio del audit log se detecta (no solo editarlo).
+49. **[S22]** El `.env` del desarrollador nunca se filtra a los tests ni abre producción.
+50. **[S22]** Existe el número que decide si el negocio existe: minutos por consulta.
 
 ---
 
@@ -676,3 +681,108 @@ riesgo clínico van uno a uno.
 43. Existe una salida destructiva: se puede descartar una consulta sin firmar.
 44. Confirmar se ordena por riesgo: lo clínico va uno a uno, nunca en bloque.
 45. Contraste ≥4.5:1 en todos los tokens de texto.
+
+## Sprint 22 — Operación y arranque del piloto · CERRADO 2026-07-13
+
+**Goal:** El sistema sobrevive un reinicio de la Mac sin intervención humana, y tenemos el
+baseline medido **antes** de que el médico use la app por primera vez.
+
+**Veredicto: CUMPLIDO** (tras el hallazgo que hacía falso el primer brazo del goal).
+
+### Qué cambió
+
+- **El sistema vuelve solo.** LaunchAgent con `KeepAlive` + `caffeinate`: arranca al encender,
+  resucita si se cae, y no deja dormir la Mac a mitad del turno.
+- **El backup se ejecuta.** `backup.sh` existía desde el Sprint 6 y **nada lo corría**: estaba
+  escrito, probado, documentado… y nunca se ejecutaba. Un backup que no corre no es un backup.
+  Ahora va a las 22:00, **se verifica a sí mismo** (restaura en un temporal y comprueba que
+  descifra), deja un checksum, y **avisa si lo estás guardando en el mismo disco que los datos**
+  — el `.tar.gz` lleva la clave maestra dentro, así que guardarlo al lado de lo que protege no
+  protege de nada.
+- **Healthcheck cada 5 minutos**, que avisa **al cambiar de estado**, no cada 5 minutos: una
+  alerta repetida durante un fin de semana entrena a ignorarlas.
+- **Métricas del piloto** (`GET /api/metrics`): mediana de revisión, **% firmadas en menos de
+  20 segundos** (proxy de "firmó sin leer"), **consultas abandonadas** (grabó y nunca firmó — el
+  indicador más honesto de que la app no sirve), y cuánto edita el médico lo que propuso la IA.
+- **Tailscale** en vez del túnel público: URL estable, HTTPS real, y **nada expuesto a internet**.
+  El túnel gratuito cambia de URL en cada arranque; el médico reinstalaría el PWA todos los días.
+- **`PILOTO.md`**: la semana de baseline con cronómetro, los dos checkpoints con **umbral
+  numérico escrito por adelantado** (si se fijan después, se racionalizan), y el protocolo de
+  dictado de cierre.
+
+### El hallazgo que hacía falso el goal
+
+El Agente C **instaló el LaunchAgent de verdad** en vez de leer el `.plist`. **No levanta el
+servidor.**
+
+macOS bloquea por TCC el acceso de los procesos de `launchd` a `Desktop`, `Documents` y
+`Downloads`. El proyecto vive en `~/Desktop/PROYECTOS_2026/`. El servicio arranca y **muere con
+`EPERM`, en silencio**: `launchctl list` marca `LastExitStatus=256` y el servidor simplemente
+no está. El médico llegaría a una app muerta y nadie sabría por qué.
+
+El test decía 9/9 porque comprobaba que el `.plist` **dijera** `KeepAlive`. Un `.plist`
+perfectamente escrito que no levanta nada.
+
+Ahora: el test **mata el proceso de verdad y comprueba que resucita**, y el instalador
+**detecta la carpeta protegida y se niega a instalar**, explicando por qué.
+
+### Y el que me rompió los tests
+
+Mi cargador de `.env` lo leía **incondicionalmente**. Un `.env` de desarrollo inyecta sus
+credenciales en cada test —que levanta su propio servidor aislado— y los rompe todos. Peor: un
+`.env` con `MEDRECORD_OPEN=1` copiado a la Mac del consultorio **abriría el servidor sin
+autenticación, en silencio**. Ahora los tests corren aislados y el modo abierto **está prohibido
+en producción**.
+
+### La cadena del audit log
+
+Al hacer que `verifyAudit` arranque desde la primera fila (para sobrevivir a la rotación), abrí
+un agujero: un atacante **recorta el principio del log** —justo donde está el rastro que quiere
+borrar— y el resto de la cadena sigue cuadrando. Ahora la primera entrada tiene que apuntar a un
+eslabón que **exista**: o el inicio, o el final de un log rotado.
+
+### Tests
+
+- `test/sprint22_operacion.mjs` → **11/11**.
+- Suite completa → **162/162, 0 fallas**, tres corridas seguidas limpias.
+
+### Qué falta todavía para un paciente real
+
+Honesto, con lo que el QA dejó anotado:
+
+1. **Mover el proyecto fuera de `~/Desktop`.** Sin eso el servicio no arranca. Es un `mv`.
+2. **Nadie ha corrido una consulta real de 20-30 minutos** de punta a punta. El número del
+   benchmark (~4.7 min hasta el borrador) es una extrapolación.
+3. **Nadie ha probado el móvil en un iPhone real.** Todo el mp4/Safari es razonamiento sobre la
+   API, no observación.
+4. **La semana de baseline no se ha hecho.** Sin ella el piloto no puede probar nada.
+5. **Un abogado peruano tiene que revisar** el consentimiento y la retención contra la Ley 29733
+   antes de cobrar. Eso no lo cierra el código.
+
+### Invariantes nuevas para el Agente A
+
+46. El server resucita solo tras caerse, sin que nadie toque nada.
+47. El backup se verifica a sí mismo: restaura y descifra, o falla ruidosamente.
+48. Borrar el principio del audit log se detecta (no solo editarlo).
+49. El `.env` del desarrollador nunca se filtra a los tests ni abre producción.
+50. Existe el número que decide si el negocio existe: minutos por consulta.
+
+---
+
+# Los 7 sprints, cerrados
+
+| Sprint | Goal | Estado |
+|---|---|---|
+| 16 · Cerrojo | Nadie sin credencial ve PII; ninguna clave se autodestruye | ✓ 8/8 |
+| 17 · Turno | 5 audios no se matan; 30 min llegan completos al LLM | ✓ 11/11 |
+| 18 · El móvil no miente | La UI refleja el micrófono real; abre sin internet | ✓ 10/10 |
+| 19 · La firma dice la verdad | Lo firmado es inalterable, auditable y con autoría | ✓ 15/15 |
+| 20 · Confianza por campo | Ningún número sin respaldo literal en el audio | ✓ 15/15 |
+| 21 · Revisión en 60s | Revisar cabe dentro de la consulta (6 clics) | ✓ 12/12 |
+| 22 · Operación | Sobrevive un reinicio; el baseline está definido | ✓ 11/11 |
+
+**Suite: 162/162.** De 69 tests que pasaban sobre un pipeline nunca ejercido, a 162 que
+ejercitan Whisper y Ollama reales, un Chromium con micrófono falso, y servidores que se matan
+y resucitan.
+
+**El siguiente paso no es código: es `PILOTO.md`.**

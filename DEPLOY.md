@@ -50,13 +50,58 @@ Te da una URL `https://algo.trycloudflare.com`. En el celular abre `…/mobile`,
 laptop `…/web`, y entras con el usuario del paso 1.
 
 **Aviso sobre el túnel gratuito:** la URL **cambia en cada arranque**. Para uso diario eso
-significa reinstalar el PWA y perder el `localStorage` (token, ajustes, diccionario) todos
-los días. Para un piloto real: named tunnel con dominio propio, o **Tailscale** — que además
-no expone nada a internet público y hace que el micrófono funcione igual.
+significa reinstalar el PWA y perder el `localStorage` todos los días. Sirve para una demo,
+no para un piloto.
+
+---
+
+## Para el piloto: Tailscale  ⭐
+
+Es la mejor opción para una clínica, y por una razón que no es técnica: **no expone el
+servidor a internet.** El túnel público pone la historia clínica de tus pacientes detrás de
+una URL que cualquiera podría descubrir; Tailscale la deja en una red privada donde solo
+entran los dispositivos que autorices.
+
+```bash
+brew install --cask tailscale
+
+# En la Mac del consultorio y en el celular del médico: iniciar sesión con la misma cuenta.
+tailscale up
+tailscale cert "$(tailscale status --json | jq -r .Self.DNSName)"   # HTTPS del tailnet
+tailscale serve https / http://localhost:3000
+```
+
+Con eso:
+
+- **URL estable** (`https://mac-consultorio.tu-tailnet.ts.net`): el PWA se instala una vez.
+- **HTTPS de verdad**, así que el micrófono del celular funciona.
+- **Nada expuesto a internet público.** Ni siquiera hay un puerto abierto.
+
+## Instalar como servicio (obligatorio para el piloto)
+
+Sin esto, una actualización de macOS de madrugada deja el servidor muerto y el médico llega a
+una app que no responde.
+
+```bash
+cp .env.example .env      # y pon tus credenciales
+bash scripts/install-launchagent.sh    # arranca al encender, vuelve si se cae, no deja dormir la Mac
+BACKUP_DIR=/Volumes/USB_CIFRADO bash scripts/install-cron.sh   # backup 22:00 + healthcheck cada 5 min
+```
+
+**`BACKUP_DIR` tiene que estar FUERA del disco de datos.** El `.tar.gz` lleva la clave maestra
+dentro: un backup al lado de lo que protege no protege de nada, y un disco que muere se lleva
+las dos cosas.
 
 **Respalda `data/.master.key` antes de exponer nada.** Sin ella, los datos cifrados son
 irrecuperables; y si el archivo se daña, el server aborta en vez de regenerarla (ver
 `RESTORE.md`).
+
+---
+
+## Antes de la primera consulta: lee `PILOTO.md`
+
+Tiene la semana de baseline (sin la cual el piloto no prueba nada), las métricas que el sistema
+mide solo, y los dos checkpoints con su umbral de **pausa** escrito por adelantado.
 
 ### Opción 2 — Frontend en Vercel + backend tuyo (Mac por túnel, o EC2)
 Subes solo el frontend estático a Vercel y lo apuntas a tu backend.

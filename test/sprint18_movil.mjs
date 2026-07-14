@@ -48,7 +48,9 @@ const w = mkdtempSync(join(tmpdir(), 'medrec-s18-'));
 const DATA = join(w, 'recordings'); mkdirSync(DATA, { recursive: true });
 
 const srv = spawn('node', ['server.js'], {
-  env: { ...process.env, PORT: String(PORT), NODE_ENV: 'production', MEDRECORD_OPEN: '1',
+  env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development',
+    MEDRECORD_SERVE_DIST: '1',   // prueba el bundle real de producción, sin abrir producción
+    MEDRECORD_OPEN: '1',
     MEDRECORD_DATA_DIR: DATA, MEDRECORD_KEY_FILE: join(w, '.key'),
     MEDRECORD_AUDIO_RETENTION_DAYS: '0' },
   stdio: 'ignore',

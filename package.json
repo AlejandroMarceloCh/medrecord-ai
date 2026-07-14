@@ -10,7 +10,7 @@
     "build": "node build.mjs",
     "start": "NODE_ENV=production node server.js",
     "preview": "npm run build && npm start",
-    "test": "for f in test/sprint*.mjs; do echo \"=== $f ===\"; node \"$f\" || exit 1; done"
+    "test": "export MEDRECORD_SKIP_DOTENV=1; for f in test/sprint*.mjs; do echo \"=== $f ===\"; node \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=18"

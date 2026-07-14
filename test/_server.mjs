@@ -27,7 +27,8 @@ export async function levantarServer({ env = {}, seed = null } = {}) {
     env: {
       ...process.env,
       PORT: String(port),
-      NODE_ENV: 'production',           // sirve dist/: probamos lo que usa el médico
+      MEDRECORD_SERVE_DIST: '1',        // sirve dist/: probamos lo que usa el médico
+      MEDRECORD_SKIP_DOTENV: '1',
       MEDRECORD_OPEN: '1',
       MEDRECORD_DATA_DIR: data,
       MEDRECORD_KEY_FILE: keyFile,

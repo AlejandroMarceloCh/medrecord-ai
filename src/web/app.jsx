@@ -266,7 +266,9 @@ export function WebRoot() {
   const [loading,    setLoading]    = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [toasts,     setToasts]     = useState([]);
-  const pushToast = (t) => setToasts(ts => [...ts, { id: Math.random().toString(36).slice(2), ...t }]);
+  // Tope de 3: si fallan 12 consultas se acumulaban 12 toasts y tapaban la pantalla entera.
+  const pushToast = (t) => setToasts(ts =>
+    [...ts, { id: Math.random().toString(36).slice(2), ...t }].slice(-3));
   const [activeTab,   setActiveTab]   = useState('pending');
   const [listSort,    setListSort]    = useState('newest');
   const [hovFieldId,  setHovFieldId]  = useState(null);

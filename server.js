@@ -11,6 +11,36 @@ process.on('uncaughtException', (err) => {
   throw err;   // un bug de verdad: que se vea el stack completo
 });
 
+// Carga .env sin dependencias, ANTES de cualquier require: crypto.js lee MEDRECORD_KEY_FILE
+// al importarse, así que cargarlo después buscaría la clave maestra en la ruta equivocada.
+//
+// Hace falta para que el LaunchAgent (que arranca la app al encender la Mac) tenga las
+// credenciales: sin ellas el fail-closed del Sprint 16 aborta y el médico llega a un
+// servidor que no levanta. Lo que ya esté en el entorno gana.
+(function cargarEnv() {
+  // Los tests corren aislados: cada uno levanta su propio server con su propio directorio de
+  // datos y sus propias credenciales. Un .env del desarrollador inyectándose ahí les cambia
+  // el admin por debajo y los rompe todos — pasó, y costó media hora encontrarlo.
+  if (process.env.MEDRECORD_SKIP_DOTENV === '1') return;
+
+  const fs0 = require('node:fs'), path0 = require('node:path');
+  try {
+    const txt = fs0.readFileSync(path0.join(__dirname, '.env'), 'utf8');
+    for (const linea of txt.split('\n')) {
+      const l = linea.trim();
+      if (!l || l.startsWith('#')) continue;
+      const i = l.indexOf('=');
+      if (i < 1) continue;
+      const clave = l.slice(0, i).trim();
+      let valor = l.slice(i + 1).trim();
+      if ((valor.startsWith('"') && valor.endsWith('"')) || (valor.startsWith("'") && valor.endsWith("'"))) {
+        valor = valor.slice(1, -1);
+      }
+      if (process.env[clave] === undefined) process.env[clave] = valor;
+    }
+  } catch { /* sin .env: se usan las variables del entorno */ }
+})();
+
 const express = require('express');
 const compression = require('compression');
 const multer = require('multer');
@@ -30,13 +60,15 @@ function bootError(msg) { const e = new Error(msg); e.code = 'MEDRECORD_BOOT'; r
 
 const APP_VERSION = require('./package.json').version;
 
+
 // Para logs: nunca imprimas el id completo ni PII, solo un prefijo no identificable.
 const shortId = (id) => String(id || '').slice(0, 8);
 
 const PROD = process.env.NODE_ENV === 'production';
 const distDir = path.join(__dirname, 'dist');
 // Producción sirve dist/ (JSX precompilado); dev sirve public/ (Babel en navegador).
-const STATIC_DIR = PROD && fs.existsSync(distDir) ? distDir : path.join(__dirname, 'public');
+const SERVIR_DIST = (PROD || process.env.MEDRECORD_SERVE_DIST === '1') && fs.existsSync(distDir);
+const STATIC_DIR = SERVIR_DIST ? distDir : path.join(__dirname, 'public');
 
 const DATA_DIR = process.env.MEDRECORD_DATA_DIR || path.join(__dirname, 'data', 'recordings');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -249,6 +281,13 @@ const cookieSecure = PROD;
 // configurar un admin dejaba /api y el WebSocket sirviendo historias completas a
 // cualquiera que alcanzara el puerto — que es exactamente lo que pasa detrás de un túnel.
 const OPEN_MODE = process.env.MEDRECORD_OPEN === '1';
+if (OPEN_MODE && PROD) {
+  // Un .env de desarrollo copiado a la Mac del consultorio abriría el servidor sin
+  // autenticación, en silencio. En producción, el modo abierto no existe.
+  console.error('\n  MEDRECORD_OPEN=1 en producción: eso dejaría las historias clínicas sin autenticación.');
+  console.error('  Quítalo del .env. El modo abierto es solo para desarrollo local.\n');
+  process.exit(1);
+}
 
 // ── CSRF: validación de Origin ───────────────────────────────────────────────
 // La única defensa era `SameSite=Strict`, y "same-site" se calcula sobre el host
@@ -370,6 +409,68 @@ function requireAdmin(req, res, next) {
   res.status(403).json({ error: 'solo admin' });
 }
 app.get('/api/users', requireAdmin, (_req, res) => res.json(auth.listUsers()));
+
+// ── Métricas del piloto ──────────────────────────────────────────────────────
+// "El médico dijo que está bacán" no es aprendizaje validado. Estas son las cifras que
+// deciden si el negocio existe, y hay que mirarlas ANTES de construir nada más.
+app.get('/api/metrics', requireAdmin, (_req, res) => {
+  const todas = [...recordings.values()];
+  const firmadas = todas.filter(r => r.reviewed && r.reviewedAt);
+
+  // Cuánto tarda el médico en revisar y firmar, desde que abre la consulta.
+  const tiempos = firmadas
+    .filter(r => r.openedAt && r.reviewedAt > r.openedAt)
+    .map(r => (r.reviewedAt - r.openedAt) / 1000);
+  const mediana = (xs) => {
+    if (!xs.length) return null;
+    const s = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
+  // Firmadas en menos de 20 s: proxy de "firmó sin leer". Es la métrica ÉTICA del piloto —
+  // si sube, el producto está enseñando al médico a confiar sin verificar.
+  const sinLeer = tiempos.filter(t => t < 20).length;
+
+  // Grabó y nunca firmó: el indicador más honesto de que la app no sirve.
+  const abandono = 24 * 3600 * 1000;
+  const abandonadas = todas.filter(r =>
+    !r.reviewed && r.status === 'done' && (Date.now() - r.createdAt) > abandono).length;
+
+  // Cuánto edita el médico lo que propuso la IA: si edita todo, el autollenado no aporta.
+  let camposIa = 0, camposEditados = 0;
+  for (const r of firmadas) {
+    const ia = flattenFields(r.fields_ia || {});
+    const fin = flattenFields(r.fields || {});
+    for (const k of Object.keys(ia)) {
+      const v = String(ia[k] || '').trim();
+      if (!v) continue;
+      camposIa++;
+      if (String(fin[k] || '').trim() !== v) camposEditados++;
+    }
+  }
+
+  res.json({
+    consultas: {
+      total: todas.length,
+      firmadas: firmadas.length,
+      pendientes: todas.filter(r => !r.reviewed && r.status === 'done').length,
+      con_error: todas.filter(r => r.status === 'error').length,
+      abandonadas,                       // grabó y nunca firmó (>24 h)
+    },
+    revision: {
+      mediana_segundos: mediana(tiempos),
+      firmadas_en_menos_de_20s: sinLeer,          // proxy de "firmó sin leer"
+      pct_sin_leer: firmadas.length ? +(100 * sinLeer / firmadas.length).toFixed(1) : null,
+      muestras: tiempos.length,
+    },
+    autollenado: {
+      campos_propuestos_por_ia: camposIa,
+      campos_editados_por_el_medico: camposEditados,
+      pct_editados: camposIa ? +(100 * camposEditados / camposIa).toFixed(1) : null,
+    },
+  });
+});
 
 // Registro de auditoría (solo admin). `readAudit` existía desde el sprint 9 y NADIE podía
 // llamarlo: un log que no se puede leer no es evidencia, es un archivo.
@@ -708,6 +809,12 @@ app.get('/api/recordings', (req, res) => {
 app.get('/api/recordings/:id', (req, res) => {
   const r = recordings.get(req.params.id);
   if (!r) return res.status(404).json({ error: 'no existe' });
+  // Primera vez que el médico la abre: es el reloj de "cuánto tarda en revisar", el número
+  // que decide si el producto sirve. Sin él, el piloto no prueba nada.
+  if (!r.openedAt && req.identity?.kind === 'user' && canSee(req.identity, r) && !r.reviewed) {
+    r.openedAt = Date.now();
+    persistSoft(r);
+  }
   if (!canSee(req.identity, r) && req.identity?.kind !== 'device') {
     auth.audit({ action: 'denied', what: 'read', user: req.identity?.id || null, rec: r.id });
   }

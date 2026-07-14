@@ -29,6 +29,13 @@ fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$DEST/backup-$STAMP.tar.gz"
 
+# Aviso: el backup al lado de los datos que protege no protege de nada. Un disco que muere
+# se lleva las dos cosas, y el tar lleva la clave maestra dentro.
+if [ "$DEST" = "$DATA_PARENT/backups" ]; then
+  echo "  AVISO: estás respaldando al MISMO disco que los datos ($DEST)."
+  echo "  Define BACKUP_DIR hacia un USB cifrado o un NAS."
+fi
+
 # Incluye recordings/ + la clave maestra. Múltiples -C cambian de directorio entre
 # entradas (soportado por bsdtar de macOS y GNU tar).
 if [ -f "$KEY_FILE" ]; then
@@ -45,3 +52,36 @@ fi
 # Retención: borra backups con más de KEEP_DAYS días.
 find "$DEST" -name 'backup-*.tar.gz' -type f -mtime +"$KEEP_DAYS" -delete 2>/dev/null || true
 echo "Retención aplicada: se conservan los últimos $KEEP_DAYS días"
+
+# ── Verificación ─────────────────────────────────────────────────────────────
+# Un backup que nunca se probó no es un backup: es un archivo con esperanza dentro.
+# Esto lo restaura en un directorio temporal y comprueba que descifra de verdad.
+VERIF="$(mktemp -d)"
+trap 'rm -rf "$VERIF"' EXIT
+
+tar -xzf "$OUT" -C "$VERIF" 2>/dev/null
+
+KEY_RESTAURADA="$VERIF/$(basename "$KEY_FILE")"
+REC_RESTAURADAS="$VERIF/$REC_NAME"
+
+if [ ! -f "$KEY_RESTAURADA" ]; then
+  echo "  FALLO: el backup NO contiene la clave maestra. Sin ella es irrecuperable."
+  exit 1
+fi
+
+SIDECAR="$(find "$REC_RESTAURADAS" -name '*.json' ! -name 'users.json' | head -1 || true)"
+if [ -n "$SIDECAR" ]; then
+  if MEDRECORD_KEY_FILE="$KEY_RESTAURADA" node -e '
+    const enc = require(process.argv[1] + "/crypto.js");
+    const json = enc.readEncrypted(process.argv[2]).toString("utf8");
+    const rec = JSON.parse(json);
+    if (!rec.id) throw new Error("el sidecar restaurado no tiene id");
+  ' "$ROOT" "$SIDECAR" 2>/dev/null; then
+    echo "  Verificado: el backup restaura y descifra correctamente."
+  else
+    echo "  FALLO: el backup NO se puede descifrar con la clave que contiene."
+    exit 1
+  fi
+fi
+
+shasum -a 256 "$OUT" | tee "$OUT.sha256"
