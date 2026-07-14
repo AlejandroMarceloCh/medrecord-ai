@@ -567,8 +567,16 @@ async function processRecording(rec) {
   if (ex) {
     rec.fields = ex.fields;
     rec.sources = ex.sources;
-    rec.fields_ia = deepCopy(ex.fields);   // snapshot intacto de lo que generó la IA (trazabilidad)
+    // El snapshot viene del LLM tomado ANTES de vaciar los dudosos: si copiáramos aquí
+    // `ex.fields`, los campos sospechosos saldrían vacíos y dejarían de contar como
+    // "poblados por la IA" — el médico podría firmar sin confirmar justo esos.
+    rec.fields_ia = ex.fields_ia || deepCopy(ex.fields);
     rec.confirmed = [];
+    // Señal de confianza: qué campos son dudosos (las dos pasadas del LLM no coincidieron)
+    // y cuáles se vaciaron por no tener respaldo numérico en el audio.
+    rec.dudosos = ex.dudosos || [];
+    rec.sugerencias = ex.sugerencias || {};
+    rec.sinEvidencia = ex.sinEvidencia || [];
   } else {
     rec.fieldsError = fieldsErr;
   }
@@ -608,6 +616,9 @@ function publicRec(r) {
     ownerId: r.ownerId || null, version: r.version || 0,
     queuePos: r.queuePos || 0,   // "vas 3 de 5" mientras espera su turno de Whisper
     provenance: r.provenance || null,   // qué modelos y qué prompt produjeron esta historia
+    dudosos: r.dudosos || [],           // el LLM no se puso de acuerdo consigo mismo
+    sugerencias: r.sugerencias || {},   // lo que propuso, para que el médico decida
+    sinEvidencia: r.sinEvidencia || [], // cifras que NO están en el audio: se vaciaron
     createdAt: r.createdAt, updatedAt: r.updatedAt || r.createdAt,
   };
 }
@@ -885,9 +896,12 @@ app.post('/api/recordings/:id/reextract', async (req, res) => {
   if (ex) {
     r.fields = ex.fields;
     r.sources = ex.sources;
-    r.fields_ia = deepCopy(ex.fields);   // nuevo snapshot de IA → reinicia confirmaciones
+    r.fields_ia = ex.fields_ia || deepCopy(ex.fields);   // nuevo snapshot de IA → reinicia confirmaciones
     r.confirmed = [];
     r.fieldsError = null;
+    r.dudosos = ex.dudosos || [];
+    r.sugerencias = ex.sugerencias || {};
+    r.sinEvidencia = ex.sinEvidencia || [];
     r.provenance = provenance();
   } else {
     r.fieldsError = err;

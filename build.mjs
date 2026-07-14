@@ -60,5 +60,20 @@ if (watch) {
     const src = join(root, 'public', f);
     if (existsSync(src)) { copyFileSync(src, join(out, f)); console.log('  ✓ ' + f); }
   }
+
+  // Y también los bundles de desarrollo. Sin esto, `node server.js` a secas (sin NODE_ENV)
+  // sirve un public/app.js viejo: la UI se queda atrás sin un solo error visible, y uno
+  // depura durante media hora una feature que sí está en el código.
+  for (const app of APPS) {
+    await esbuild.build({
+      ...base,
+      entryPoints: [join(root, app.entry)],
+      outfile:   join(root, app.dev),
+      define:    { 'process.env.NODE_ENV': '"development"' },
+      sourcemap: 'inline',
+    });
+    console.log('  ✓ ' + app.dev + ' (dev)');
+  }
+
   console.log('\nBuild listo. Producción: NODE_ENV=production node server.js\n');
 }

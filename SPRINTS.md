@@ -53,6 +53,11 @@ La lista que el Agente A verifica al cerrar **cada** sprint. Crece; nunca se pod
 33. **[S19]** Si el disco falla, el PUT no dice "firmado" — y un fallo de disco nunca tumba el servidor.
 34. **[S19]** El audit log está encadenado: editar una entrada se detecta.
 35. **[S19]** Un origen ajeno no puede escribir (CSRF), y el WS revalida la sesión en cada envío.
+36. **[S20]** Ninguna cifra entra a la historia sin estar en el audio — en NINGÚN campo.
+37. **[S20]** Los signos vitales los extrae un regex, no el LLM. Un dato ajeno (FC fetal, presión de la madre) no entra.
+38. **[S20]** Un campo dudoso llega vacío, pero `fields_ia` conserva lo que la IA propuso: hay que confirmarlo igual.
+39. **[S20]** El ámbar es la excepción, no la norma: una redacción distinta del mismo hecho no se marca dudosa.
+40. **[S20]** `npm run build` regenera también los bundles de dev: la UI nunca se queda atrás en silencio.
 
 ---
 
@@ -473,3 +478,111 @@ Ahora devuelve 500 y revierte la RAM.
 33. Si el disco falla, el PUT no dice "firmado" — y un fallo de disco nunca tumba el servidor.
 34. El audit log está encadenado: editar una entrada se detecta.
 35. Un origen ajeno no puede escribir (CSRF), y el WS revalida la sesión en cada envío.
+
+## Sprint 20 — Confianza por campo · CERRADO 2026-07-13
+
+**Goal:** Ningún número clínico llega a la historia sin estar literalmente en la transcripción,
+y el médico ve de un vistazo qué campos son dudosos.
+
+**Veredicto: CUMPLIDO** (tras cerrar los dos P0 que hicieron que el primer veredicto fuera
+GOAL NO CUMPLIDO).
+
+### Qué cambió
+
+**Los números ya no pasan por el LLM.** Una presión arterial es un patrón, no lenguaje: un
+regex la saca sin inventar nada, un 7B puede alucinarla. `clinical-values.js` extrae los
+signos vitales de forma determinista, **incluso dictados en palabras** ("ciento cincuenta
+sobre noventa y cinco" → 150/95), y **toda** cifra que el modelo ponga y que no esté en el
+audio se vacía y se marca.
+
+**Confianza por desacuerdo.** La confianza no sale del modelo —los logprobs de un 7B están mal
+calibrados, su "estoy 90% seguro" no significa nada—: sale de preguntarle dos veces de formas
+distintas y ver si se contradice. Es la Selection Policy del curso, adaptada a lo que se puede
+pagar en la Mac de un consultorio.
+
+**Los campos dudosos llegan VACÍOS**, con la sugerencia al lado y un botón para aceptarla.
+Pre-rellenarlos invita a confirmar sin leer, y con 150 clics de "Confirmar" al día el médico
+aprende a no mirar. Y lo dudoso va **arriba**, en un banner: revisar 12 historias no puede
+significar bajar por un scroll de 22 campos buscando qué está mal.
+
+**El CIE-10, apagado.** Lo inventaba un 7B sin catálogo, y ese código es lo que la clínica le
+factura a la aseguradora. Un código plausible y falso es peor que vacío.
+
+### El bug que solo el pipeline real podía mostrar (otra vez)
+
+`buildSources` volvió a devolver **cero fuentes**: el modelo dejó de incluir `_fuentes` porque
+la clave solo se pedía en prosa, no estaba en el esquema JSON. Que la evidencia —la feature que
+justifica confiar en la IA— dependa de que un 7B se acuerde de incluir una clave es una
+fragilidad de diseño. Ahora está en el esquema, **y** hay un respaldo determinista que busca la
+frase por su cuenta.
+
+Y aparecieron **citas verbatim pero irrelevantes**: para `filiacion.nombre` el modelo citaba
+*"Buenos días doctor"*. Es verbatim, así que pasaba la validación, y el médico veía una
+evidencia que no evidencia nada. Una cita decorativa es **peor** que ninguna: hace confiar en un
+campo que nadie dijo. De 0 → 14 → **12 fuentes, todas pertinentes**.
+
+### Tests
+
+- `test/sprint20_confianza.mjs` → **15/15**.
+- Suite completa → **139/139, 0 fallas**.
+
+### QA (protocolo anticagadas)
+
+**Los agentes A y C dictaminaron GOAL NO CUMPLIDO en el primer pase, y tenían razón en las dos
+cosas.**
+
+- **P0 (A y C, por caminos distintos):** yo vaciaba los campos dudosos **antes** de copiar
+  `fields_ia`. Consecuencia: dejaban de contar como "poblados por la IA", así que el gate de
+  human-in-the-loop no los exigía — **el médico podía firmar sin haber mirado justo los campos
+  que el sistema marcó como sospechosos**. C lo reprodujo por HTTP: firmó una historia
+  confirmando solo dos campos triviales. Y la firma sellaba un `fields_ia` que ya no probaba qué
+  había propuesto la máquina, que es LA pregunta de una disputa. Fix: el snapshot se toma antes.
+- **P0 (C):** *"ningún número"* era **falso**. Yo validaba seis campos. Una dosis inventada
+  entraba tranquila por `plan.indicaciones` (*"paracetamol 1000 mg cada 8 horas"*), una fiebre
+  por `sintomas`. Ahora se valida **todo** campo que salga del audio.
+- **B (sabueso), cuatro hallazgos clínicos reales:**
+  - *"frecuencia cardíaca **fetal** de 140"* entraba como la FC del paciente. **140 lpm es
+    fisiológico en un feto y taquicardia franca en un adulto.**
+  - *"temperatura **ambiente** 30 grados"* entraba como temperatura corporal (30 °C cae dentro
+    del rango fisiológico, así que el rango no lo filtraba).
+  - Con **dos presiones** en la consulta (*"la de la mamá era 180/100, la del paciente 120/80"*)
+    tomaba la primera — la de otra persona. Whisper no diariza, así que ahora no pone ninguna.
+  - `palabrasANumero` sumaba sin orden: *"cinco veinte"* daba 25 y *"dos ciento"* daba 102.
+    Números plausibles, dentro del rango, y completamente inventados.
+- **B, el hallazgo de diseño (el que más importa):** comparar por igualdad exacta marcaba dudoso
+  *"cefalea tensional"* vs *"cefalea de tipo tensional"* — el mismo hecho dicho distinto. Eso
+  convertía el ámbar en el estado normal, **entrenando al médico a ignorarlo**: exactamente el
+  fallo que la señal existe para evitar. Ahora los campos narrativos se comparan por solapamiento
+  de contenido. **Medido en consulta real: 1 dudoso de 22 campos. El ámbar es excepción.**
+- **Un footgun operativo:** `public/app.js` (el bundle de dev) quedaba desactualizado, así que
+  quien corriera `npm run dev` **no veía la UI nueva, sin un solo error**. Ahora `npm run build`
+  regenera los dos.
+
+### Benchmark real (Whisper + Ollama)
+
+Consulta de 71 s: vitales por regex **150/95 · 88 · 36.8 · 98**, CIE-10 vacío, 12 fuentes
+vinculadas, **1 campo dudoso**, 0 cifras sin evidencia. El LLM tarda el doble (dos pasadas), lo
+que es el precio de la señal de confianza.
+
+### Deuda abierta
+
+- **Sinónimos**: *"dolor de cabeza"* y *"cefalea"* se marcan como desacuerdo (el Jaccard no ve
+  sinónimos). Genera algún ámbar de más. Un diccionario clínico lo cerraría.
+- **`dudosos`/`sugerencias` no están en el payload firmado**: se pueden editar tras firmar sin
+  invalidar `/verify`. Pero el valor disputado **sí** está sellado en `fields_ia`, así que solo
+  se podría manipular la etiqueta cosmética, no el dato. P3.
+- **Sin diarización**: lo que el paciente **especula** ("creo que es dengue") puede terminar en
+  el diagnóstico. El protocolo de dictado de cierre lo mitiga sin código. → S22.
+- La deuda de S17-S19 sigue: consulta real de 20-30 min, móvil en un iPhone real, rotación del
+  audit log.
+
+### Invariantes nuevas para el Agente A
+
+36. Ninguna cifra entra a la historia sin estar en el audio — en NINGÚN campo.
+37. Los signos vitales los extrae un regex, no el LLM. Un dato ajeno (FC fetal, presión de la
+    madre) no entra.
+38. Un campo dudoso llega vacío, pero `fields_ia` conserva lo que la IA propuso: hay que
+    confirmarlo igual.
+39. El ámbar es la excepción, no la norma: una redacción distinta del mismo hecho no se marca
+    dudosa.
+40. `npm run build` regenera también los bundles de dev: la UI nunca se queda atrás en silencio.

@@ -294,7 +294,12 @@ try {
   delete require.cache[require.resolve('../llm.js')];
   const llm = require('../llm.js');
   const comoWhisper = 'Cuénteme qué lo trae por acá.\n Mire doctor, hace tres días que tengo\n dolor de cabeza que no se me quita.\n La presión está en 150 sobre 95.';
+  // El modelo devuelve los campos Y sus fuentes. Una fuente sin su valor no respalda nada,
+  // así que el fixture tiene que traer ambos (el Sprint 20 añadió esa validación).
   const parsed = {
+    anamnesis: { motivo_consulta: 'dolor de cabeza que no se le quita' },
+    examen_fisico: { presion_arterial: '150/95' },
+    plan: { tratamiento: 'reposo' },
     _fuentes: {
       // El LLM cita colapsando los saltos: así es como realmente responde.
       'anamnesis.motivo_consulta': 'Mire doctor, hace tres días que tengo dolor de cabeza que no se me quita.',

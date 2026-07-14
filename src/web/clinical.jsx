@@ -7,23 +7,29 @@ import { recName, fmtDateTime, fmtDur, countEmpty, flattenFields, unflattenVals,
 // ── ClinicalField ────────────────────────────────────────────────────────────
 // needsConfirm: campo poblado por IA que el médico aún no confirmó ni editó.
 // Se resalta y exige una acción explícita antes de poder firmar (human-in-the-loop).
-export function ClinicalField({ id, label, value, long, filterMode, onChange, onHover, hasSource, needsConfirm, onConfirm }) {
+// dudoso: las dos pasadas del LLM no coincidieron. El campo llega VACÍO, con la sugerencia
+//   al lado y un botón para aceptarla. Pre-rellenarlo invitaría a confirmar sin leer, que es
+//   el fallo que mata al producto (150 clics de "Confirmar" al día enseñan a no mirar).
+// sinEvidencia: la cifra que el modelo puso NO está en el audio. Se vació.
+export function ClinicalField({ id, label, value, long, filterMode, onChange, onHover, hasSource,
+  needsConfirm, onConfirm, dudoso, sugerencia, sinEvidencia }) {
   const [focus, setFocus] = useState(false);
   const empty = !String(value||'').trim();
   const warn  = filterMode && empty;
   const flag  = needsConfirm && !warn;   // resalte de "confirmar IA"
+  const ambar = (dudoso || sinEvidencia) && empty;   // dudoso y todavía sin llenar
   const Input = long ? 'textarea' : 'input';
   const pad = (warn || flag) ? '10px 8px' : '10px 0';
   return (
-    <div
+    <div id={'f-'+id}
       onMouseEnter={hasSource ? () => onHover?.(id) : undefined}
       onMouseLeave={hasSource ? () => onHover?.(null) : undefined}
       style={{ padding: pad,
         margin: (warn || flag) ? '0 -8px' : 0, borderRadius: (warn || flag) ? 6 : 0,
-        borderLeft: flag ? '2px solid var(--accent)' : undefined,
-        borderBottom:`1px solid ${focus?'var(--accent)':warn?'var(--warn-border)':'var(--border-subtle)'}`,
+        borderLeft: ambar ? '2px solid var(--warn)' : flag ? '2px solid var(--accent)' : undefined,
+        borderBottom:`1px solid ${focus?'var(--accent)':(warn||ambar)?'var(--warn-border)':'var(--border-subtle)'}`,
         transition:'border-color 0.12s, background 0.12s',
-        background: warn ? 'var(--warn-bg)' : flag ? 'var(--accent-soft)' : 'transparent' }}>
+        background: (warn || ambar) ? 'var(--warn-bg)' : flag ? 'var(--accent-soft)' : 'transparent' }}>
       <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:4 }}>
         {empty && <span style={{ width:5, height:5, borderRadius:'50%', background:'var(--warn-dot)', flexShrink:0 }}/>}
         <label style={{ fontSize:10.5, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase',
@@ -41,6 +47,26 @@ export function ClinicalField({ id, label, value, long, filterMode, onChange, on
           </button>
         )}
       </div>
+      {sinEvidencia && empty && (
+        <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:5, fontSize:11,
+          fontWeight:650, color:'var(--warn)' }}>
+          <Icon name="warn" size={11}/> SIN EVIDENCIA EN LA TRANSCRIPCIÓN
+        </div>
+      )}
+      {dudoso && sugerencia && empty && (
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6, flexWrap:'wrap' }}>
+          <span style={{ fontSize:11, fontWeight:650, color:'var(--warn)' }}>DUDOSO ·</span>
+          <span style={{ fontSize:12.5, color:'var(--muted)', fontStyle:'italic' }}>
+            la IA propuso “{sugerencia}”
+          </span>
+          <button type="button" onClick={()=>onChange(id, sugerencia)}
+            style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'2px 8px', borderRadius:5,
+              background:'transparent', color:'var(--warn)', border:'1px solid var(--warn-border)',
+              cursor:'pointer', fontSize:10.5, fontWeight:700, fontFamily:'inherit' }}>
+            Aceptar
+          </button>
+        </div>
+      )}
       <Input value={value||''} onChange={e=>onChange(id,e.target.value)}
         onFocus={()=>setFocus(true)} onBlur={()=>setFocus(false)}
         placeholder={empty?'Sin datos…':''}
@@ -181,6 +207,25 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
   const isAi = (id) => !!String(iaFlat[id]||'').trim();
   const aiIds = useMemo(()=>Object.keys(iaFlat).filter(k=>String(iaFlat[k]||'').trim()), [iaFlat]);
   const confirmField = (id) => setConfirmed(s => { const n = new Set(s); n.add(id); return n; });
+
+  // Señal de confianza del backend: campos donde las dos pasadas del LLM no coincidieron
+  // (dudosos), y cifras que el modelo puso pero NO están en el audio (sinEvidencia).
+  const dudosos      = useMemo(()=>new Set(rec?.dudosos || []), [rec?.dudosos]);
+  const sugerencias  = rec?.sugerencias || {};
+  const sinEvidencia = useMemo(()=>new Set(rec?.sinEvidencia || []), [rec?.sinEvidencia]);
+
+  // Lo que todavía está dudoso Y vacío: es lo que el médico tiene que mirar primero.
+  const porRevisar = useMemo(() => {
+    const ids = new Set([...dudosos, ...sinEvidencia]);
+    return [...ids].filter(id => !String(vals[id]||'').trim());
+  }, [dudosos, sinEvidencia, vals]);
+
+  const labelDe = (id) => {
+    for (const sec of FIELD_SECTIONS) {
+      for (const [fk, label] of sec.fields) if (`${sec.key}.${fk}` === id) return label;
+    }
+    return id;
+  };
 
   // Merge incoming LLM field updates without overwriting user edits
   useEffect(() => {
@@ -324,6 +369,33 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
             </div>
           ) : (<>
             {!isReviewed && <AiBanner rec={rec} emptyCount={emptyCount} onReextract={doReextract} reextracting={reextracting} pendingConfirm={pendingConfirm.length}/>}
+
+            {/* Lo dudoso, arriba. El médico revisa 12 historias: tiene que ver de un vistazo
+                qué mirar primero, no descubrirlo bajando por un scroll de 22 campos. */}
+            {!isReviewed && porRevisar.length > 0 && (
+              <div style={{ marginBottom:24, padding:'12px 14px', borderRadius:10,
+                background:'var(--warn-bg)', border:'1px solid var(--warn-border)' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
+                  <Icon name="warn" size={15} style={{ color:'var(--warn)' }}/>
+                  <span style={{ fontSize:13, fontWeight:680, color:'var(--warn)' }}>
+                    {porRevisar.length} {porRevisar.length===1?'campo dudoso':'campos dudosos'}: revísalos primero
+                  </span>
+                </div>
+                <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                  {porRevisar.map(id => (
+                    <button key={id} type="button" onClick={()=>{
+                      const el = document.getElementById('f-'+id);
+                      if (el) { el.scrollIntoView({ behavior:'smooth', block:'center' }); el.focus?.(); }
+                    }}
+                      style={{ padding:'3px 9px', borderRadius:999, fontSize:11.5, fontWeight:600,
+                        background:'var(--surface)', color:'var(--warn)', border:'1px solid var(--warn-border)',
+                        cursor:'pointer', fontFamily:'inherit' }}>
+                      {labelDe(id)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {FIELD_SECTIONS.map(sec => {
               const shown = sec.fields.map(([fk,label,long]) => {
                 const id = `${sec.key}.${fk}`;
@@ -333,6 +405,8 @@ export function ClinicalFields({ rec, cfg, dict, onHoverField, onSaved, onDelete
                   <ClinicalField key={id} id={id} label={label} long={long} value={vals[id]||''}
                     filterMode={onlyEmpty} onChange={setField}
                     onHover={onHoverField} hasSource={!!sources[id]}
+                    dudoso={dudosos.has(id)} sugerencia={sugerencias[id]}
+                    sinEvidencia={sinEvidencia.has(id)}
                     needsConfirm={!isReviewed && isAi(id) && !confirmed.has(id)} onConfirm={confirmField}/>
                 );
               }).filter(Boolean);
